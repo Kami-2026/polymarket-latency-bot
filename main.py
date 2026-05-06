@@ -29,20 +29,26 @@ def log(msg):
 async def binance_feed():
     global btc_price
     url = "wss://ws.kraken.com"
-    log("🔌 Connexion Kraken WebSocket...")
-    async with websockets.connect(url) as ws:
-        await ws.send(json.dumps({
-            "event": "subscribe",
-            "pair": ["XBT/USD"],
-            "subscription": {"name": "trade"}
-        }))
-        log("✅ Kraken connecté")
-        async for msg in ws:
-            data = json.loads(msg)
-            if isinstance(data, list) and len(data) > 1:
-                trades = data[1]
-                if isinstance(trades, list) and trades:
-                    btc_price = float(trades[0][0])
+    while True:
+        try:
+            log("🔌 Connexion Kraken WebSocket...")
+            async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
+                await ws.send(json.dumps({
+                    "event": "subscribe",
+                    "pair": ["XBT/USD"],
+                    "subscription": {"name": "trade"}
+                }))
+                log("✅ Kraken connecté")
+                async for msg in ws:
+                    data = json.loads(msg)
+                    if isinstance(data, list) and len(data) > 1:
+                        trades = data[1]
+                        if isinstance(trades, list) and trades:
+                            btc_price = float(trades[0][0])
+        except Exception as e:
+            log(f"⚠️ Kraken déconnecté: {e} — reconnexion dans 5s...")
+            btc_price = None
+            await asyncio.sleep(5)
                     
 # ── 2. Prix BTC sur Polymarket ─────────────────────────────
 async def get_polymarket_btc_price():
