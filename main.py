@@ -52,39 +52,35 @@ async def binance_feed():
                     
 # ── 2. Prix BTC sur Polymarket ─────────────────────────────
 async def get_polymarket_btc_price():
-    """
-    Récupère le prix du contrat BTC UP sur le marché 5 min actuel.
-    Un prix de 0.52 = 52% de chance que BTC monte → BTC est légèrement haussier.
-    """
     try:
-        # Calcule le timestamp de la fenêtre 5 min actuelle
-        now = int(time.time())
-        window_start = now - (now % 300)
-
         url = "https://gamma-api.polymarket.com/markets"
         params = {
-            "tag": "crypto",
-            "limit": 50,
-            "active": "true"
+            "limit": 20,
+            "active": "true",
+            "closed": "false"
         }
         async with httpx.AsyncClient(timeout=5) as client:
             resp = await client.get(url, params=params)
             markets = resp.json()
 
-        # Cherche le marché BTC 5 min actif
+        # Debug : affiche tous les slugs reçus
+        slugs = [m.get("slug", "") for m in markets]
+        log(f"🔍 Marchés reçus: {slugs[:5]}")
+
         for m in markets:
-            slug = m.get("slug", "")
-            if "btc" in slug.lower() and "5m" in slug.lower():
+            slug = m.get("slug", "").lower()
+            question = m.get("question", "").lower()
+            if ("btc" in slug or "bitcoin" in slug) and ("5" in slug or "5" in question):
                 outcomes = m.get("outcomes", [])
                 prices   = m.get("outcomePrices", [])
+                log(f"✅ Marché BTC trouvé: {slug}")
                 if outcomes and prices:
                     for i, outcome in enumerate(outcomes):
-                        if "up" in outcome.lower():
+                        if "up" in outcome.lower() or "yes" in outcome.lower():
                             return float(prices[i]), m.get("conditionId", "")
     except Exception as e:
         log(f"⚠️ Erreur Polymarket: {e}")
     return None, None
-
 # ── 3. Détection du lag et trade paper ────────────────────
 async def detect_and_trade():
     global daily_pnl, trade_count, balance
