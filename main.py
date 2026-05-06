@@ -11,7 +11,7 @@ load_dotenv()
 
 # ── Configuration ──────────────────────────────────────────
 LAG_THRESHOLD   = 0.003   # déclenche si écart > 0.3%
-MIN_BTC_MOVE    = 0.002   # BTC doit avoir bougé d'au moins 0.2%
+MIN_BTC_MOVE    = 0.0003   # BTC doit avoir bougé d'au moins 0.03%
 STAKE_USDC      = 10.0    # mise par trade (paper)
 MAX_DAILY_LOSS  = 0.02    # limite perte journalière 2%
 PAPER_BALANCE   = 1000.0  # solde simulé de départ
