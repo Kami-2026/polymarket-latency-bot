@@ -25,6 +25,7 @@ trade_count     = 0
 win_count       = 0
 loss_count      = 0
 balance         = PAPER_BALANCE
+clob_token_id   = None
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -54,48 +55,58 @@ async def kraken_feed():
             btc_price = None
             await asyncio.sleep(3)
 
-# ── 2. Prix Polymarket BTC 5 min ───────────────────────────
+# ── 2. Prix Polymarket via CLOB (temps réel) ───────────────
 async def get_poly_price():
+    global clob_token_id
     try:
-        now = int(time.time())
+        # Si on a le token_id → prix direct via CLOB (rapide)
+        if clob_token_id:
+            url = f"https://clob.polymarket.com/midpoint?token_id={clob_token_id}"
+            async with httpx.AsyncClient(timeout=2) as client:
+                resp = await client.get(url)
+                data = resp.json()
+                up_price = float(data["mid"])
+                return up_price, 1 - up_price, clob_token_id
+
+        # Sinon → cherche le token_id via Gamma
+        now          = int(time.time())
         window_start = now - (now % 300)
-        slug = f"btc-updown-5m-{window_start}"
-        url = f"https://gamma-api.polymarket.com/events?slug={slug}"
+        slug         = f"btc-updown-5m-{window_start}"
+        url          = f"https://gamma-api.polymarket.com/events?slug={slug}"
 
         async with httpx.AsyncClient(timeout=3) as client:
-            resp = await client.get(url)
+            resp   = await client.get(url)
             events = resp.json()
 
         if not events:
+            log(f"⚠️ Marché introuvable: {slug}")
             return None, None, None
 
-        event = events[0]
-        markets = event.get("markets", [])
-
+        markets = events[0].get("markets", [])
         for m in markets:
             outcomes = m.get("outcomes", "[]")
-            prices   = m.get("outcomePrices", "[]")
+            tokens   = m.get("clobTokenIds", "[]")
             if isinstance(outcomes, str):
                 outcomes = json.loads(outcomes)
-            if isinstance(prices, str):
-                prices = json.loads(prices)
+            if isinstance(tokens, str):
+                tokens = json.loads(tokens)
             for i, outcome in enumerate(outcomes):
                 if "up" in outcome.lower() or "yes" in outcome.lower():
-                    up_price   = float(prices[i])
-                    down_price = 1 - up_price
-                    return up_price, down_price, m.get("conditionId", "")
+                    clob_token_id = tokens[i]
+                    log(f"🔑 Token CLOB: {clob_token_id[:20]}...")
+                    return await get_poly_price()
 
     except Exception as e:
-        pass
+        log(f"⚠️ Poly: {e}")
     return None, None, None
 
 # ── 3. Scalping loop ───────────────────────────────────────
 async def scalping_loop():
-    global daily_pnl, trade_count, win_count, loss_count, balance
+    global daily_pnl, trade_count, win_count, loss_count, balance, clob_token_id
 
     log("🤖 Bot SCALPING démarré — mode PAPER TRADING")
     log(f"💰 Balance : ${balance:.2f} | Mise : ${STAKE_USDC:.2f}")
-    log(f"📊 Entry lag: {LAG_ENTRY*100:.1f}% | Exit lag: {LAG_EXIT*100:.1f}% | Stop: {STOP_LOSS*100:.1f}% | Zone interdite: {MIN_SECONDS}s")
+    log(f"📊 Entry: {LAG_ENTRY*100:.1f}% | Exit: {LAG_EXIT*100:.1f}% | Stop: {STOP_LOSS*100:.1f}% | Zone interdite: {MIN_SECONDS}s")
     log("-" * 60)
 
     window_open_price = None
@@ -108,20 +119,21 @@ async def scalping_loop():
             continue
 
         # Suivi fenêtre 5 min
-        now          = int(time.time())
+        now            = int(time.time())
         current_window = now - (now % 300)
         seconds_left   = 300 - (now % 300)
 
         if current_window != last_window:
+            clob_token_id     = None        # reset token à chaque fenêtre
             window_open_price = btc_price
             last_window       = current_window
             log(f"")
-            log(f"🕐 Fenêtre | BTC: ${btc_price:,.2f} | {seconds_left}s | Trades: {trade_count} | Balance: ${balance:.2f} | Daily P&L: ${daily_pnl:+.2f}")
+            log(f"🕐 Fenêtre | BTC: ${btc_price:,.2f} | {seconds_left}s | Trades: {trade_count} | Balance: ${balance:.2f} | Daily: ${daily_pnl:+.2f}")
 
         if window_open_price is None:
             continue
 
-        # Zone interdite dernières 60s
+        # Zone interdite
         if seconds_left < MIN_SECONDS:
             continue
 
@@ -132,7 +144,7 @@ async def scalping_loop():
             continue
 
         # Prix Polymarket
-        up_price, down_price, condition_id = await get_poly_price()
+        up_price, down_price, token_id = await get_poly_price()
         if up_price is None:
             continue
 
@@ -142,17 +154,17 @@ async def scalping_loop():
 
         log(f"📡 BTC: ${btc_price:,.2f} ({btc_delta*100:+.3f}%) | UP: {up_price:.3f} | Attendu: {expected:.3f} | Lag: {lag*100:+.2f}% | {seconds_left}s")
 
-        # Pas assez de lag → on attend
+        # Pas assez de lag
         if abs(lag) < LAG_ENTRY:
             continue
 
         # Direction
         if lag > 0:
-            direction  = "YES (UP)"
-            entry      = up_price
+            direction = "YES (UP)"
+            entry     = up_price
         else:
-            direction  = "NO (DOWN)"
-            entry      = down_price
+            direction = "NO (DOWN)"
+            entry     = down_price
 
         shares       = STAKE_USDC / entry
         trade_count += 1
@@ -175,13 +187,13 @@ async def scalping_loop():
                 continue
 
             # Calcul P&L basé sur réduction du lag
-            btc_delta2 = (btc_price - window_open_price) / window_open_price
-            expected2  = max(0.01, min(0.99, 0.50 + (btc_delta2 * 2)))
-            lag_now    = expected2 - up2
+            btc_delta2  = (btc_price - window_open_price) / window_open_price
+            expected2   = max(0.01, min(0.99, 0.50 + (btc_delta2 * 2)))
+            lag_now     = expected2 - up2
             lag_reduced = abs(lag_at_entry) - abs(lag_now)
-            pnl_now    = lag_reduced * shares
+            pnl_now     = lag_reduced * shares
+            elapsed     = time.time() - entry_time
 
-            elapsed = time.time() - entry_time
             log(f"   ⏳ {elapsed:.0f}s | UP: {up2:.3f} | Lag: {lag_now*100:+.2f}% | P&L: ${pnl_now:+.2f} | {seconds_left2}s")
 
             # Conditions de sortie
@@ -195,7 +207,7 @@ async def scalping_loop():
                 exit_reason = "⏰ FIN FENÊTRE"
 
             if exit_reason:
-                won = pnl_now > 0
+                won        = pnl_now > 0
                 daily_pnl += pnl_now
                 balance   += pnl_now
                 if won:
