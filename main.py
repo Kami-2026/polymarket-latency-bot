@@ -53,31 +53,42 @@ async def binance_feed():
 # ── 2. Prix BTC sur Polymarket ─────────────────────────────
 async def get_polymarket_btc_price():
     try:
-        url = "https://gamma-api.polymarket.com/markets"
-        params = {
-            "limit": 20,
-            "active": "true",
-            "closed": "false"
-        }
+        # Calcule le timestamp de la fenêtre 5 min actuelle
+        now = int(time.time())
+        window_start = now - (now % 300)
+        
+        # Construit le slug exact du marché BTC 5 min
+        slug = f"btc-updown-5m-{window_start}"
+        url = f"https://gamma-api.polymarket.com/events?slug={slug}"
+        
         async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(url, params=params)
-            markets = resp.json()
-
-        # Debug : affiche tous les slugs reçus
-        slugs = [m.get("slug", "") for m in markets]
-        log(f"🔍 Marchés reçus: {slugs[:5]}")
-
+            resp = await client.get(url)
+            events = resp.json()
+        
+        if not events:
+            log(f"⚠️ Marché introuvable: {slug}")
+            return None, None
+            
+        event = events[0]
+        markets = event.get("markets", [])
+        
         for m in markets:
-            slug = m.get("slug", "").lower()
             question = m.get("question", "").lower()
-            if ("btc" in slug or "bitcoin" in slug) and ("5" in slug or "5" in question):
-                outcomes = m.get("outcomes", [])
-                prices   = m.get("outcomePrices", [])
-                log(f"✅ Marché BTC trouvé: {slug}")
-                if outcomes and prices:
-                    for i, outcome in enumerate(outcomes):
-                        if "up" in outcome.lower() or "yes" in outcome.lower():
-                            return float(prices[i]), m.get("conditionId", "")
+            outcomes = m.get("outcomes", "[]")
+            prices   = m.get("outcomePrices", "[]")
+            
+            # outcomes et prices sont des strings JSON
+            if isinstance(outcomes, str):
+                outcomes = json.loads(outcomes)
+            if isinstance(prices, str):
+                prices = json.loads(prices)
+                
+            for i, outcome in enumerate(outcomes):
+                if "up" in outcome.lower() or "yes" in outcome.lower():
+                    price = float(prices[i])
+                    log(f"✅ Poly BTC UP price: {price:.3f} | {slug}")
+                    return price, m.get("conditionId", "")
+                    
     except Exception as e:
         log(f"⚠️ Erreur Polymarket: {e}")
     return None, None
