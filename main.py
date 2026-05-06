@@ -28,14 +28,22 @@ def log(msg):
 # ── 1. Prix BTC en temps réel via Binance ──────────────────
 async def binance_feed():
     global btc_price
-    url = "wss://stream.binance.com:9443/ws/btcusdt@trade"
-    log("🔌 Connexion Binance WebSocket...")
+    url = "wss://ws.kraken.com"
+    log("🔌 Connexion Kraken WebSocket...")
     async with websockets.connect(url) as ws:
-        log("✅ Binance connecté")
+        await ws.send(json.dumps({
+            "event": "subscribe",
+            "pair": ["XBT/USD"],
+            "subscription": {"name": "trade"}
+        }))
+        log("✅ Kraken connecté")
         async for msg in ws:
             data = json.loads(msg)
-            btc_price = float(data["p"])
-
+            if isinstance(data, list) and len(data) > 1:
+                trades = data[1]
+                if isinstance(trades, list) and trades:
+                    btc_price = float(trades[0][0])
+                    
 # ── 2. Prix BTC sur Polymarket ─────────────────────────────
 async def get_polymarket_btc_price():
     """
