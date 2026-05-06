@@ -11,10 +11,11 @@ load_dotenv()
 
 # ── Configuration ──────────────────────────────────────────
 LAG_ENTRY       = 0.003   # entre si lag > 0.3%
-LAG_EXIT        = 0.001   # sort si lag < 0.1% (Poly a rattrapé)
+LAG_EXIT        = 0.001   # sort si lag < 0.1%
 STOP_LOSS       = 0.015   # stop loss à -1.5%
 STAKE_USDC      = 50.0    # mise par trade
 MAX_DAILY_LOSS  = 0.05    # limite perte journalière 5%
+MIN_SECONDS     = 60      # zone interdite dernières 60s
 PAPER_BALANCE   = 1000.0  # solde simulé
 
 # ── État global ────────────────────────────────────────────
@@ -94,7 +95,7 @@ async def scalping_loop():
 
     log("🤖 Bot SCALPING démarré — mode PAPER TRADING")
     log(f"💰 Balance : ${balance:.2f} | Mise : ${STAKE_USDC:.2f}")
-    log(f"📊 Entry lag: {LAG_ENTRY*100:.1f}% | Exit lag: {LAG_EXIT*100:.1f}% | Stop: {STOP_LOSS*100:.1f}%")
+    log(f"📊 Entry lag: {LAG_ENTRY*100:.1f}% | Exit lag: {LAG_EXIT*100:.1f}% | Stop: {STOP_LOSS*100:.1f}% | Zone interdite: {MIN_SECONDS}s")
     log("-" * 60)
 
     window_open_price = None
@@ -107,7 +108,7 @@ async def scalping_loop():
             continue
 
         # Suivi fenêtre 5 min
-        now = int(time.time())
+        now          = int(time.time())
         current_window = now - (now % 300)
         seconds_left   = 300 - (now % 300)
 
@@ -115,12 +116,16 @@ async def scalping_loop():
             window_open_price = btc_price
             last_window       = current_window
             log(f"")
-            log(f"🕐 Fenêtre | BTC: ${btc_price:,.2f} | {seconds_left}s | Trades: {trade_count} | Balance: ${balance:.2f}")
+            log(f"🕐 Fenêtre | BTC: ${btc_price:,.2f} | {seconds_left}s | Trades: {trade_count} | Balance: ${balance:.2f} | Daily P&L: ${daily_pnl:+.2f}")
 
-        if window_open_price is None or seconds_left < 15:
+        if window_open_price is None:
             continue
 
-        # Vérif limite journalière
+        # Zone interdite dernières 60s
+        if seconds_left < MIN_SECONDS:
+            continue
+
+        # Limite journalière
         if daily_pnl < -(balance * MAX_DAILY_LOSS):
             log("🛑 Limite journalière atteinte")
             await asyncio.sleep(300)
@@ -131,13 +136,13 @@ async def scalping_loop():
         if up_price is None:
             continue
 
-        btc_delta    = (btc_price - window_open_price) / window_open_price
-        expected     = max(0.01, min(0.99, 0.50 + (btc_delta * 2)))
-        lag          = expected - up_price  # positif = Poly sous-estime UP
+        btc_delta = (btc_price - window_open_price) / window_open_price
+        expected  = max(0.01, min(0.99, 0.50 + (btc_delta * 2)))
+        lag       = expected - up_price
 
-        log(f"📡 BTC: ${btc_price:,.2f} ({btc_delta*100:+.3f}%) | UP: {up_price:.3f} | Attendu: {expected:.3f} | Lag: {lag*100:+.2f}%")
+        log(f"📡 BTC: ${btc_price:,.2f} ({btc_delta*100:+.3f}%) | UP: {up_price:.3f} | Attendu: {expected:.3f} | Lag: {lag*100:+.2f}% | {seconds_left}s")
 
-        # Signal d'entrée
+        # Pas assez de lag → on attend
         if abs(lag) < LAG_ENTRY:
             continue
 
@@ -149,53 +154,44 @@ async def scalping_loop():
             direction  = "NO (DOWN)"
             entry      = down_price
 
-        shares        = STAKE_USDC / entry
-        trade_count  += 1
+        shares       = STAKE_USDC / entry
+        trade_count += 1
+        lag_at_entry = lag
 
         log(f"")
-        log(f"⚡ ENTRÉE #{trade_count} | {direction} @ {entry:.3f} | {shares:.1f} shares | Mise: ${STAKE_USDC:.2f}")
+        log(f"⚡ ENTRÉE #{trade_count} | {direction} @ {entry:.3f} | {shares:.1f} shares | Mise: ${STAKE_USDC:.2f} | {seconds_left}s restantes")
 
         # ── Boucle de sortie ───────────────────────────────
         entry_time = time.time()
-        best_pnl   = 0
 
         while True:
             await asyncio.sleep(0.5)
 
-            now2         = int(time.time())
+            now2          = int(time.time())
             seconds_left2 = 300 - (now2 % 300)
 
             up2, down2, _ = await get_poly_price()
             if up2 is None:
                 continue
 
-            # Prix courant de notre position
-            current_price = up2 if direction == "YES (UP)" else (1 - up2)
-            pnl_now       = (current_price - entry) * shares
-            elapsed       = time.time() - entry_time
+            # Calcul P&L basé sur réduction du lag
+            btc_delta2 = (btc_price - window_open_price) / window_open_price
+            expected2  = max(0.01, min(0.99, 0.50 + (btc_delta2 * 2)))
+            lag_now    = expected2 - up2
+            lag_reduced = abs(lag_at_entry) - abs(lag_now)
+            pnl_now    = lag_reduced * shares
 
-            # Lag actuel
-            btc_delta2   = (btc_price - window_open_price) / window_open_price
-            expected2    = max(0.01, min(0.99, 0.50 + (btc_delta2 * 2)))
-            lag_now      = expected2 - up2
-
-            log(f"   ⏳ {elapsed:.0f}s | Pos: {current_price:.3f} | P&L: ${pnl_now:+.2f} | Lag restant: {lag_now*100:+.2f}%")
-
-            best_pnl = max(best_pnl, pnl_now)
+            elapsed = time.time() - entry_time
+            log(f"   ⏳ {elapsed:.0f}s | UP: {up2:.3f} | Lag: {lag_now*100:+.2f}% | P&L: ${pnl_now:+.2f} | {seconds_left2}s")
 
             # Conditions de sortie
             exit_reason = None
 
-            # 1. Poly a rattrapé → sortie profit
             if abs(lag_now) <= LAG_EXIT:
                 exit_reason = "✅ LAG RATTRAPÉ"
-
-            # 2. Stop loss
             elif pnl_now < -(STAKE_USDC * STOP_LOSS):
                 exit_reason = "🛑 STOP LOSS"
-
-            # 3. Fin de fenêtre proche
-            elif seconds_left2 < 15:
+            elif seconds_left2 < 10:
                 exit_reason = "⏰ FIN FENÊTRE"
 
             if exit_reason:
@@ -210,7 +206,7 @@ async def scalping_loop():
                 winrate = (win_count / trade_count * 100) if trade_count > 0 else 0
                 log(f"")
                 log(f"{'✅' if won else '❌'} SORTIE {exit_reason} | P&L: ${pnl_now:+.2f} | Balance: ${balance:.2f}")
-                log(f"   Durée: {elapsed:.0f}s | Win rate: {winrate:.0f}% ({win_count}W/{loss_count}L) | Daily: ${daily_pnl:+.2f}")
+                log(f"   Durée: {elapsed:.0f}s | Win: {winrate:.0f}% ({win_count}W/{loss_count}L) | Daily: ${daily_pnl:+.2f}")
                 log(f"")
                 break
 
