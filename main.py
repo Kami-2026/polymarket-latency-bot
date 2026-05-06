@@ -10,22 +10,25 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Configuration ──────────────────────────────────────────
-LAG_THRESHOLD   = 0.003   # déclenche si écart > 0.3%
-MIN_BTC_MOVE    = 0.0003   # BTC doit avoir bougé d'au moins 0.03%
-STAKE_USDC      = 10.0    # mise par trade (paper)
-MAX_DAILY_LOSS  = 0.02    # limite perte journalière 2%
-PAPER_BALANCE   = 1000.0  # solde simulé de départ
+LAG_ENTRY       = 0.003   # entre si lag > 0.3%
+LAG_EXIT        = 0.001   # sort si lag < 0.1% (Poly a rattrapé)
+STOP_LOSS       = 0.015   # stop loss à -1.5%
+STAKE_USDC      = 50.0    # mise par trade
+MAX_DAILY_LOSS  = 0.05    # limite perte journalière 5%
+PAPER_BALANCE   = 1000.0  # solde simulé
 
 # ── État global ────────────────────────────────────────────
 btc_price       = None
 daily_pnl       = 0.0
 trade_count     = 0
+win_count       = 0
+loss_count      = 0
 balance         = PAPER_BALANCE
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ── 1. Prix BTC en temps réel via Kraken ──────────────────
+# ── 1. Prix BTC Kraken ─────────────────────────────────────
 async def kraken_feed():
     global btc_price
     url = "wss://ws.kraken.com"
@@ -46,24 +49,24 @@ async def kraken_feed():
                         if isinstance(trades, list) and trades:
                             btc_price = float(trades[0][0])
         except Exception as e:
-            log(f"⚠️ Kraken déconnecté: {e} — reconnexion dans 5s...")
+            log(f"⚠️ Kraken déconnecté: {e} — reconnexion dans 3s...")
             btc_price = None
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
 
-# ── 2. Prix BTC sur Polymarket ─────────────────────────────
-async def get_polymarket_btc_price():
+# ── 2. Prix Polymarket BTC 5 min ───────────────────────────
+async def get_poly_price():
     try:
         now = int(time.time())
         window_start = now - (now % 300)
         slug = f"btc-updown-5m-{window_start}"
         url = f"https://gamma-api.polymarket.com/events?slug={slug}"
 
-        async with httpx.AsyncClient(timeout=5) as client:
+        async with httpx.AsyncClient(timeout=3) as client:
             resp = await client.get(url)
             events = resp.json()
 
         if not events:
-            return None, None
+            return None, None, None
 
         event = events[0]
         markets = event.get("markets", [])
@@ -77,125 +80,145 @@ async def get_polymarket_btc_price():
                 prices = json.loads(prices)
             for i, outcome in enumerate(outcomes):
                 if "up" in outcome.lower() or "yes" in outcome.lower():
-                    return float(prices[i]), m.get("conditionId", "")
+                    up_price   = float(prices[i])
+                    down_price = 1 - up_price
+                    return up_price, down_price, m.get("conditionId", "")
 
     except Exception as e:
-        log(f"⚠️ Erreur Polymarket: {e}")
-    return None, None
+        pass
+    return None, None, None
 
-# ── 3. Détection du lag et trade paper ────────────────────
-async def detect_and_trade():
-    global daily_pnl, trade_count, balance
+# ── 3. Scalping loop ───────────────────────────────────────
+async def scalping_loop():
+    global daily_pnl, trade_count, win_count, loss_count, balance
 
-    log("🤖 Bot démarré en mode PAPER TRADING")
-    log(f"💰 Balance simulée : ${balance:.2f}")
-    log(f"📊 Seuil de lag : {LAG_THRESHOLD*100:.1f}% | Mouvement BTC min: {MIN_BTC_MOVE*100:.1f}%")
+    log("🤖 Bot SCALPING démarré — mode PAPER TRADING")
+    log(f"💰 Balance : ${balance:.2f} | Mise : ${STAKE_USDC:.2f}")
+    log(f"📊 Entry lag: {LAG_ENTRY*100:.1f}% | Exit lag: {LAG_EXIT*100:.1f}% | Stop: {STOP_LOSS*100:.1f}%")
     log("-" * 60)
 
     window_open_price = None
-    last_window = None
+    last_window       = None
 
     while True:
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
         if btc_price is None:
-            log("⏳ En attente du prix BTC...")
             continue
 
-        # Nouvelle fenêtre 5 min ?
+        # Suivi fenêtre 5 min
         now = int(time.time())
         current_window = now - (now % 300)
-        seconds_left = 300 - (now % 300)
+        seconds_left   = 300 - (now % 300)
 
         if current_window != last_window:
             window_open_price = btc_price
-            last_window = current_window
+            last_window       = current_window
             log(f"")
-            log(f"🕐 Nouvelle fenêtre | BTC open: ${btc_price:,.2f} | Ferme dans {seconds_left}s")
+            log(f"🕐 Fenêtre | BTC: ${btc_price:,.2f} | {seconds_left}s | Trades: {trade_count} | Balance: ${balance:.2f}")
 
-        if window_open_price is None:
-            continue
-
-        # Calcule le delta BTC
-        btc_delta = (btc_price - window_open_price) / window_open_price
-
-        # Récupère le prix Polymarket
-        poly_price, condition_id = await get_polymarket_btc_price()
-
-        if poly_price is None:
-            log(f"📡 BTC: ${btc_price:,.2f} | delta: {btc_delta*100:+.3f}% | Poly: N/A | {seconds_left}s restantes")
-            continue
-
-        # Prix attendu sur Polymarket
-        expected_poly = 0.50 + (btc_delta * 2)
-        expected_poly = max(0.01, min(0.99, expected_poly))
-        lag = abs(expected_poly - poly_price)
-
-        # Log continu toutes les 2 secondes
-        log(f"📡 BTC: ${btc_price:,.2f} | delta: {btc_delta*100:+.3f}% | Poly UP: {poly_price:.3f} | Attendu: {expected_poly:.3f} | Lag: {lag*100:.2f}% | {seconds_left}s")
-
-        # Arrête les trades dans les 30 dernières secondes
-        if seconds_left < 30:
+        if window_open_price is None or seconds_left < 15:
             continue
 
         # Vérif limite journalière
         if daily_pnl < -(balance * MAX_DAILY_LOSS):
-            log("🛑 Limite journalière atteinte, bot en pause")
-            await asyncio.sleep(60)
+            log("🛑 Limite journalière atteinte")
+            await asyncio.sleep(300)
             continue
 
-        # Filtre : BTC doit avoir bougé d'au moins 0.2%
-        if abs(btc_delta) < MIN_BTC_MOVE:
+        # Prix Polymarket
+        up_price, down_price, condition_id = await get_poly_price()
+        if up_price is None:
             continue
 
-        # Lag détecté → trade simulé
-        if lag >= LAG_THRESHOLD:
-            # Direction correcte basée sur le lag
-            if expected_poly > poly_price:
-                direction = "YES (UP)"
-                entry_price = poly_price
-            else:
-                direction = "NO (DOWN)"
-                entry_price = 1 - poly_price
+        btc_delta    = (btc_price - window_open_price) / window_open_price
+        expected     = max(0.01, min(0.99, 0.50 + (btc_delta * 2)))
+        lag          = expected - up_price  # positif = Poly sous-estime UP
 
-            shares    = STAKE_USDC / entry_price
-            pnl_win   = shares * (1 - entry_price)
-            pnl_loss  = -STAKE_USDC
+        log(f"📡 BTC: ${btc_price:,.2f} ({btc_delta*100:+.3f}%) | UP: {up_price:.3f} | Attendu: {expected:.3f} | Lag: {lag*100:+.2f}%")
 
-            trade_count += 1
-            log(f"")
-            log(f"🚨 LAG DÉTECTÉ #{trade_count}")
-            log(f"   BTC réel    : ${btc_price:,.2f} (delta: {btc_delta*100:+.3f}%)")
-            log(f"   Poly UP     : {poly_price:.3f} | Attendu: {expected_poly:.3f}")
-            log(f"   Lag         : {lag*100:.2f}%")
-            log(f"   Direction   : {direction} @ {entry_price:.3f}")
-            log(f"   Mise        : ${STAKE_USDC:.2f} | Gain potentiel: ${pnl_win:.2f}")
-            log(f"   [PAPER] Ordre simulé — pas de vrai trade envoyé")
-            log(f"")
+        # Signal d'entrée
+        if abs(lag) < LAG_ENTRY:
+            continue
 
-            # Attends la fin de la fenêtre
-            await asyncio.sleep(seconds_left + 2)
+        # Direction
+        if lag > 0:
+            direction  = "YES (UP)"
+            entry      = up_price
+        else:
+            direction  = "NO (DOWN)"
+            entry      = down_price
 
-            # Résultat simulé
-            final_delta = (btc_price - window_open_price) / window_open_price
-            if direction == "YES (UP)":
-                won = final_delta > 0
-            else:
-                won = final_delta < 0
+        shares        = STAKE_USDC / entry
+        trade_count  += 1
 
-            pnl = pnl_win if won else pnl_loss
-            daily_pnl += pnl
-            balance   += pnl
+        log(f"")
+        log(f"⚡ ENTRÉE #{trade_count} | {direction} @ {entry:.3f} | {shares:.1f} shares | Mise: ${STAKE_USDC:.2f}")
 
-            result = "✅ GAGNÉ" if won else "❌ PERDU"
-            log(f"{result} | P&L: ${pnl:+.2f} | Balance: ${balance:.2f} | Daily P&L: ${daily_pnl:+.2f} | Trades: {trade_count}")
-            log(f"")
+        # ── Boucle de sortie ───────────────────────────────
+        entry_time = time.time()
+        best_pnl   = 0
 
-# ── 4. Point d'entrée ──────────────────────────────────────
+        while True:
+            await asyncio.sleep(0.5)
+
+            now2         = int(time.time())
+            seconds_left2 = 300 - (now2 % 300)
+
+            up2, down2, _ = await get_poly_price()
+            if up2 is None:
+                continue
+
+            # Prix courant de notre position
+            current_price = up2 if direction == "YES (UP)" else (1 - up2)
+            pnl_now       = (current_price - entry) * shares
+            elapsed       = time.time() - entry_time
+
+            # Lag actuel
+            btc_delta2   = (btc_price - window_open_price) / window_open_price
+            expected2    = max(0.01, min(0.99, 0.50 + (btc_delta2 * 2)))
+            lag_now      = expected2 - up2
+
+            log(f"   ⏳ {elapsed:.0f}s | Pos: {current_price:.3f} | P&L: ${pnl_now:+.2f} | Lag restant: {lag_now*100:+.2f}%")
+
+            best_pnl = max(best_pnl, pnl_now)
+
+            # Conditions de sortie
+            exit_reason = None
+
+            # 1. Poly a rattrapé → sortie profit
+            if abs(lag_now) <= LAG_EXIT:
+                exit_reason = "✅ LAG RATTRAPÉ"
+
+            # 2. Stop loss
+            elif pnl_now < -(STAKE_USDC * STOP_LOSS):
+                exit_reason = "🛑 STOP LOSS"
+
+            # 3. Fin de fenêtre proche
+            elif seconds_left2 < 15:
+                exit_reason = "⏰ FIN FENÊTRE"
+
+            if exit_reason:
+                won = pnl_now > 0
+                daily_pnl += pnl_now
+                balance   += pnl_now
+                if won:
+                    win_count += 1
+                else:
+                    loss_count += 1
+
+                winrate = (win_count / trade_count * 100) if trade_count > 0 else 0
+                log(f"")
+                log(f"{'✅' if won else '❌'} SORTIE {exit_reason} | P&L: ${pnl_now:+.2f} | Balance: ${balance:.2f}")
+                log(f"   Durée: {elapsed:.0f}s | Win rate: {winrate:.0f}% ({win_count}W/{loss_count}L) | Daily: ${daily_pnl:+.2f}")
+                log(f"")
+                break
+
+# ── 4. Main ────────────────────────────────────────────────
 async def main():
     await asyncio.gather(
         kraken_feed(),
-        detect_and_trade()
+        scalping_loop()
     )
 
 if __name__ == "__main__":
