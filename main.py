@@ -127,6 +127,7 @@ async def detect_and_trade():
         # Récupère le prix Polymarket
         poly_price, condition_id = await get_polymarket_btc_price()
         if poly_price is None:
+            log("⚠️ Polymarket: pas de prix trouvé")
             continue
 
         # Prix "neutre" sur Polymarket = 0.50 (50/50)
