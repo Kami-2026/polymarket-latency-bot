@@ -100,10 +100,11 @@ async def chainlink_feed():
                     "action": "subscribe",
                     "subscriptions": [{
                         "topic": "crypto_prices_chainlink",
-                        "type": "*",
-                        "filters": "{\"symbol\":\"btc/usd\"}"
+                        "type": "update",
+                        "filters": ""
                     }]
                 }))
+                log("📤 Souscription Chainlink envoyée")
                 log("✅ Chainlink connecté")
                 async for msg in ws:
                     # Ignore messages vides ou PING texte
