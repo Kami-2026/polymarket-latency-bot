@@ -17,15 +17,15 @@ MIN_SECONDS       = 60
 HOLD_TO_END_PRICE = 0.90
 MAX_DAILY_LOSS    = 0.05
 PAPER_BALANCE     = 1000.0
-MIN_LAG_POINTS    = 0.03   # lag minimum de 3 points pour entrer
-MIN_DURATION      = 5      # mouvement Kraken stable depuis 5s minimum
+MIN_LAG_POINTS    = 0.03
+MIN_DURATION      = 5
 
 # ── État global ────────────────────────────────────────────
 btc_kraken        = None
 btc_chainlink     = None
 btc_coinbase      = None
-chainlink_strike  = None   # prix Chainlink à l'ouverture de la fenêtre
-tare_history      = deque(maxlen=10)  # moyenne mobile tare
+chainlink_strike  = None
+tare_history      = deque(maxlen=10)
 daily_pnl         = 0.0
 trade_count       = 0
 win_count         = 0
@@ -104,10 +104,9 @@ async def chainlink_feed():
                         "filters": ""
                     }]
                 }))
-                log("📤 Souscription Chainlink envoyée")
                 log("✅ Chainlink connecté")
+                log("📤 Souscription Chainlink envoyée")
                 async for msg in ws:
-                    # Ignore messages vides ou PING texte
                     if not msg or msg == "PING":
                         await ws.send("PONG")
                         continue
@@ -168,55 +167,39 @@ async def get_poly_price():
         log(f"⚠️ Poly: {e}")
     return None
 
-# ── 5. Calcul tare moyenne ─────────────────────────────────
+# ── 5. Tare moyenne ────────────────────────────────────────
 def get_tare():
     if not tare_history:
         return 0
     return sum(tare_history) / len(tare_history)
 
-# ── 6. Conversion delta BTC → probabilité Poly ────────────
+# ── 6. Delta BTC → probabilité Poly ───────────────────────
 def delta_to_poly(btc_vs_strike):
-    """
-    Convertit l'écart BTC vs strike en probabilité Poly théorique.
-    Basé sur la table observée sur Polymarket :
-    delta < 0.005% → 0.50
-    delta ~ 0.02%  → 0.55
-    delta ~ 0.05%  → 0.65
-    delta ~ 0.10%  → 0.80
-    delta ~ 0.15%+ → 0.92+
-    """
     if chainlink_strike is None or chainlink_strike == 0:
         return 0.50
-
-    pct = btc_vs_strike / chainlink_strike  # variation en %
-
-    if abs(pct) < 0.00005:     # < 0.005%
-        return 0.50
-    elif abs(pct) < 0.0002:    # 0.005% - 0.02%
+    pct = btc_vs_strike / chainlink_strike
+    if abs(pct) < 0.00005:
+        prob = 0.50
+    elif abs(pct) < 0.0002:
         prob = 0.50 + (pct / 0.0002) * 0.05
-    elif abs(pct) < 0.0005:    # 0.02% - 0.05%
+    elif abs(pct) < 0.0005:
         prob = 0.55 + ((pct - 0.0002) / 0.0003) * 0.10
-    elif abs(pct) < 0.001:     # 0.05% - 0.10%
+    elif abs(pct) < 0.001:
         prob = 0.65 + ((pct - 0.0005) / 0.0005) * 0.15
-    else:                       # > 0.10%
+    else:
         prob = 0.80 + min((pct - 0.001) / 0.0005, 1.0) * 0.15
-
     return max(0.01, min(0.99, prob))
 
 # ── 7. Analyse signal Kraken ───────────────────────────────
 def analyze_kraken():
     if len(kraken_history) < 5:
         return None, 0, 0
-
     prices = [p for _, p in kraken_history]
     times  = [t for t, _ in kraken_history]
-
     latest    = prices[-1]
     intensity = (latest - prices[0]) / prices[0]
     direction = "UP" if intensity > 0 else "DOWN"
-
-    # Durée du mouvement continu
-    duration = 0
+    duration  = 0
     for i in range(len(prices) - 1, 0, -1):
         move = prices[i] - prices[i-1]
         if (direction == "UP" and move >= 0) or \
@@ -224,7 +207,6 @@ def analyze_kraken():
             duration = times[-1] - times[i-1]
         else:
             break
-
     return direction, duration, intensity
 
 # ── 8. Scalping loop ───────────────────────────────────────
@@ -244,7 +226,6 @@ async def scalping_loop():
     while True:
         await asyncio.sleep(1)
 
-        # Prix Kraken prioritaire
         btc_price = btc_kraken or btc_coinbase
         if btc_price is None:
             continue
@@ -257,50 +238,37 @@ async def scalping_loop():
         if current_window != last_window:
             clob_token_id    = None
             last_window      = current_window
-            chainlink_strike = btc_chainlink  # strike = prix Chainlink à l'ouverture
+            chainlink_strike = btc_chainlink
             kraken_history.clear()
-            log(f"")
             cl_str = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
             st_str = f"${chainlink_strike:,.2f}" if chainlink_strike else "N/A"
-            log(f"🕐 Fenêtre | BTC Kraken: ${btc_price:,.2f} | "
+            log(f"")
+            log(f"🕐 Fenêtre | BTC: ${btc_price:,.2f} | "
                 f"Chainlink: {cl_str} | Strike: {st_str} | "
                 f"{seconds_left}s | Balance: ${balance:.2f} | Daily: ${daily_pnl:+.2f}")
 
-        # Enregistre historique Kraken
         kraken_history.append((now, btc_price))
 
-        # Met à jour la tare
         if btc_kraken and btc_chainlink:
             tare_history.append(btc_kraken - btc_chainlink)
 
-        # Limite journalière
         if daily_pnl < -(balance * MAX_DAILY_LOSS):
             log("🛑 Limite journalière atteinte")
             await asyncio.sleep(300)
             continue
 
-        # Zone interdite
         if seconds_left < MIN_SECONDS:
             continue
 
-        # Prix Polymarket
         poly_price = await get_poly_price()
         if poly_price is None or btc_chainlink is None or chainlink_strike is None:
             continue
 
-        # Tare moyenne
-        tare = get_tare()
-
-        # Position BTC vs strike (vue de Chainlink)
+        tare          = get_tare()
         btc_vs_strike = btc_chainlink - chainlink_strike
+        poly_theo     = delta_to_poly(btc_vs_strike)
+        lag           = poly_theo - poly_price
 
-        # Prix Poly théorique
-        poly_theo = delta_to_poly(btc_vs_strike)
-
-        # Lag réel = écart entre Poly théorique et Poly réel
-        lag = poly_theo - poly_price  # positif = Poly sous-estime UP
-
-        # Analyse signal Kraken
         direction, duration, intensity = analyze_kraken()
 
         if now % 10 == 0:
@@ -314,21 +282,13 @@ async def scalping_loop():
                 f"Kraken {direction} {duration:.0f}s | "
                 f"{seconds_left}s")
 
-        # ── Filtres d'entrée ───────────────────────────────
-
-        # 1. Lag insuffisant
+        # Filtres d'entrée
         if abs(lag) < MIN_LAG_POINTS:
             continue
-
-        # 2. Poly hors fourchette
         if poly_price < POLY_MIN or poly_price > POLY_MAX:
             continue
-
-        # 3. Durée signal Kraken insuffisante
         if duration < MIN_DURATION:
             continue
-
-        # 4. Direction Kraken doit confirmer le lag
         if lag > 0 and direction != "UP":
             continue
         if lag < 0 and direction != "DOWN":
@@ -342,11 +302,10 @@ async def scalping_loop():
             trade_dir = "NO (DOWN)"
             entry     = 1 - poly_price
 
-        shares       = STAKE_USDC / entry
-        trade_count += 1
-        btc_at_entry = btc_price
-        cl_at_entry  = btc_chainlink
-        best_pnl     = 0.0
+        shares        = STAKE_USDC / entry
+        trade_count  += 1
+        btc_at_entry  = btc_price
+        best_pnl      = 0.0
         reversal_time = None
         lag_at_entry  = lag
 
@@ -368,6 +327,8 @@ async def scalping_loop():
             seconds_left2 = 300 - (now2 % 300)
             elapsed       = time.time() - entry_time
 
+            btc_now = btc_kraken or btc_coinbase
+
             up2 = await get_poly_price()
             if up2 is None:
                 continue
@@ -378,17 +339,16 @@ async def scalping_loop():
             if pnl_now > best_pnl:
                 best_pnl = pnl_now
 
-            # Recalcule le lag actuel
+            # Lag actuel
             btc_vs_strike2 = btc_chainlink - chainlink_strike if btc_chainlink else 0
             poly_theo2     = delta_to_poly(btc_vs_strike2)
             lag_now        = poly_theo2 - up2
 
             # Kraken dans notre sens ?
-            btc_change    = (btc_price - btc_at_entry) / btc_at_entry
+            btc_change    = (btc_now - btc_at_entry) / btc_at_entry if btc_now else 0
             going_our_way = (btc_change >= -0.0001 and trade_dir == "YES (UP)") or \
                             (btc_change <=  0.0001 and trade_dir == "NO (DOWN)")
 
-            # Gestion retournement
             if going_our_way:
                 if reversal_time is not None:
                     log(f"   🔁 Re-retournement ! Countdown annulé")
@@ -399,12 +359,11 @@ async def scalping_loop():
                     log(f"   🔄 Kraken retourné ! Countdown démarré...")
 
             time_since_reversal = (time.time() - reversal_time) if reversal_time else 0
+            countdown_str = f"⏱️ {round(time_since_reversal)}s" if reversal_time else "✅"
 
             log(f"   ⏳ {elapsed:.0f}s | UP: {up2:.3f} | Pos: {pos_price:.3f} | "
                 f"P&L: ${pnl_now:+.2f} | Best: ${best_pnl:+.2f} | "
-                f"Lag: {lag_now:+.3f} | "
-                f"{'⏱️ '+str(round(time_since_reversal))+'s' if reversal_time else '✅'} | "
-                f"{seconds_left2}s")
+                f"Lag: {lag_now:+.3f} | {countdown_str} | {seconds_left2}s")
 
             exit_reason = None
 
@@ -418,18 +377,31 @@ async def scalping_loop():
                     pnl_now   = (pos_final - entry) * shares
                 exit_reason = "🏆 RÉSOLUTION FENÊTRE"
 
-            # 2. Lag rattrapé → Poly a suivi → sortir si positif
+            # 2. Lag rattrapé → sortir si positif
             elif abs(lag_now) < 0.01 and pnl_now > 0:
                 exit_reason = "✅ LAG RATTRAPÉ"
 
-            # 3. Kraken retourné + lag écoulé
+            # 3. Lag inversé → Poly a dépassé → sortir
+            elif lag_at_entry > 0 and lag_now < -0.04:
+                if pnl_now > 0:
+                    exit_reason = "✅ LAG INVERSÉ (profit)"
+                elif elapsed > 20:
+                    exit_reason = "⚠️ LAG INVERSÉ (sortie)"
+
+            elif lag_at_entry < 0 and lag_now > 0.04:
+                if pnl_now > 0:
+                    exit_reason = "✅ LAG INVERSÉ (profit)"
+                elif elapsed > 20:
+                    exit_reason = "⚠️ LAG INVERSÉ (sortie)"
+
+            # 4. Kraken retourné depuis 15s → sortir si positif
             elif reversal_time and time_since_reversal >= 15:
                 if pnl_now > 0:
                     exit_reason = "✅ SORTIE APRÈS RETOURNEMENT"
                 elif time_since_reversal >= 25:
                     exit_reason = "⚠️ SORTIE FORCÉE"
 
-            # 4. Fin fenêtre
+            # 5. Fin fenêtre
             elif seconds_left2 < 10:
                 exit_reason = "⏰ FIN FENÊTRE"
 
