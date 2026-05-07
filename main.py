@@ -91,7 +91,7 @@ async def coinbase_feed():
 # ── 3. Feed Chainlink via Polymarket RTDS ──────────────────
 async def chainlink_feed():
     global btc_chainlink
-    url = "wss://data-api.polymarket.com/ws/market-data"
+    url = "wss://ws-live-data.polymarket.com"
     while True:
         try:
             log("🔌 Connexion Chainlink (Polymarket RTDS)...")
