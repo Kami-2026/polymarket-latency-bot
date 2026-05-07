@@ -210,8 +210,8 @@ async def scalping_loop():
 
             # Kraken toujours dans notre sens ?
             kraken_change = (btc_price - kraken_at_entry) / kraken_at_entry
-            going_our_way = (kraken_change >= 0 and direction == "YES (UP)") or \
-                            (kraken_change <= 0 and direction == "NO (DOWN)")
+            going_our_way = (kraken_change >= -0.0002 and direction == "YES (UP)") or \
+                            (kraken_change <= 0.0002 and direction == "NO (DOWN)")
 
             log(f"   ⏳ {elapsed:.0f}s | UP: {up2:.3f} | Pos: {pos_price:.3f} | "
                 f"P&L: ${pnl_now:+.2f} | Best: ${best_pnl:+.2f} | "
