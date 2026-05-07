@@ -228,9 +228,12 @@ async def scalping_loop():
                     pnl_now   = (pos_final - entry) * shares
                 exit_reason = "🏆 RÉSOLUTION FENÊTRE"
 
-            # 2. Kraken se retourne → sortie immédiate
+          # 2. Kraken se retourne → sortir seulement si positif
             elif not going_our_way:
-                exit_reason = "🔄 KRAKEN RETOURNÉ"
+                if pnl_now > 0:
+                    exit_reason = "🔄 KRAKEN RETOURNÉ ✅"
+                else:
+                    log(f"   ⚠️ Kraken retourné mais P&L négatif — on attend Poly...")
 
             # 3. Fin de fenêtre urgente
             elif seconds_left2 < 10:
