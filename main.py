@@ -428,14 +428,34 @@ async def scalping_loop():
                     f"Daily: ${daily_pnl:+.2f}")
                 log(f"")
                 break
-
-# ── 9. Main ────────────────────────────────────────────────
+                
+# ── 9. Rapport horaire ─────────────────────────────────────
+async def hourly_report():
+    while True:
+        await asyncio.sleep(3600)  # attend 1 heure
+        winrate = (win_count / trade_count * 100) if trade_count > 0 else 0
+        avg_pnl = daily_pnl / trade_count if trade_count > 0 else 0
+        log(f"")
+        log(f"{'='*60}")
+        log(f"📊 RAPPORT HORAIRE — {datetime.now().strftime('%H:%M')}")
+        log(f"{'='*60}")
+        log(f"   💰 Balance      : ${balance:.2f}")
+        log(f"   📈 Daily P&L    : ${daily_pnl:+.2f}")
+        log(f"   🎯 Trades       : {trade_count} ({win_count}W / {loss_count}L)")
+        log(f"   ✅ Win rate     : {winrate:.1f}%")
+        log(f"   💵 Gain moyen   : ${avg_pnl:+.2f} / trade")
+        log(f"   🔗 Tare moyenne : ${get_tare():+.1f}")
+        log(f"{'='*60}")
+        log(f"")
+        
+# ── 10. Main ────────────────────────────────────────────────
 async def main():
     await asyncio.gather(
         kraken_feed(),
         coinbase_feed(),
         chainlink_feed(),
-        scalping_loop()
+        scalping_loop(),
+        hourly_report()
     )
 
 if __name__ == "__main__":
