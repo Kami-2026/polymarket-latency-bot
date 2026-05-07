@@ -275,7 +275,7 @@ async def scalping_loop():
                     pnl_now   = (pos_final - entry) * shares
                 exit_reason = "🏆 RÉSOLUTION FENÊTRE"
 
-       elif best_pnl >= 1.0 and pnl_now < best_pnl * 0.5 and pnl_now > 0:
+            elif best_pnl >= 1.0 and pnl_now < best_pnl * 0.5 and pnl_now > 0:
                 exit_reason = "🔒 PROTECTION PROFIT"
 
             # 3. Kraken retourné depuis lag mesuré → sortir si positif ou neutre
