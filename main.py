@@ -11,8 +11,8 @@ load_dotenv()
 
 # ── Configuration ──────────────────────────────────────────
 STAKE_USDC        = 50.0
-POLY_MIN          = 0.35
-POLY_MAX          = 0.65
+POLY_MIN          = 0.40
+POLY_MAX          = 0.60
 MIN_SECONDS       = 60
 HOLD_TO_END_PRICE = 0.90
 MAX_DAILY_LOSS    = 0.05
