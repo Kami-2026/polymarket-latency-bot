@@ -156,8 +156,9 @@ async def scalping_loop():
         if poly_price is None:
             continue
 
-        log(f"📡 BTC: ${btc_price:,.2f} | Move: {kraken_move*100:+.3f}% | "
-            f"Poly UP: {poly_price:.3f} | {seconds_left}s")
+        if now % 10 == 0:
+            log(f"📡 BTC: ${btc_price:,.2f} | Move: {kraken_move*100:+.3f}% | "
+                f"Poly UP: {poly_price:.3f} | {seconds_left}s")
 
         # ── Filtres d'entrée ───────────────────────────────
 
