@@ -1,7 +1,7 @@
 import asyncio
 import json
 import time
-import os
+from collections import deque
 from datetime import datetime
 import websockets
 import httpx
@@ -10,13 +10,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Configuration ──────────────────────────────────────────
-LAG_ENTRY       = 0.003   # entre si lag > 0.3%
-LAG_EXIT        = 0.001   # sort si lag < 0.1%
-STOP_LOSS       = 0.015   # stop loss à -1.5%
-STAKE_USDC      = 50.0    # mise par trade
-MAX_DAILY_LOSS  = 0.05    # limite perte journalière 5%
-MIN_SECONDS     = 60      # zone interdite dernières 60s
-PAPER_BALANCE   = 1000.0  # solde simulé
+STAKE_USDC        = 50.0    # mise par trade
+MAX_DAILY_LOSS    = 0.05    # limite 5%
+MIN_SECONDS       = 60      # zone interdite fin fenêtre
+HOLD_TO_END_PRICE = 0.90    # tenir jusqu'à fin si > 0.90
+MIN_MOVE          = 0.0003  # mouvement Kraken minimum 0.03%
+PAPER_BALANCE     = 1000.0
 
 # ── État global ────────────────────────────────────────────
 btc_price       = None
@@ -26,6 +25,8 @@ win_count       = 0
 loss_count      = 0
 balance         = PAPER_BALANCE
 clob_token_id   = None
+kraken_history  = deque(maxlen=120)
+poly_history    = deque(maxlen=120)
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -55,20 +56,17 @@ async def kraken_feed():
             btc_price = None
             await asyncio.sleep(3)
 
-# ── 2. Prix Polymarket via CLOB (temps réel) ───────────────
+# ── 2. Prix Polymarket CLOB ────────────────────────────────
 async def get_poly_price():
     global clob_token_id
     try:
-        # Si on a le token_id → prix direct via CLOB (rapide)
         if clob_token_id:
             url = f"https://clob.polymarket.com/midpoint?token_id={clob_token_id}"
             async with httpx.AsyncClient(timeout=2) as client:
                 resp = await client.get(url)
                 data = resp.json()
-                up_price = float(data["mid"])
-                return up_price, 1 - up_price, clob_token_id
+                return float(data["mid"])
 
-        # Sinon → cherche le token_id via Gamma
         now          = int(time.time())
         window_start = now - (now % 300)
         slug         = f"btc-updown-5m-{window_start}"
@@ -79,8 +77,7 @@ async def get_poly_price():
             events = resp.json()
 
         if not events:
-            log(f"⚠️ Marché introuvable: {slug}")
-            return None, None, None
+            return None
 
         markets = events[0].get("markets", [])
         for m in markets:
@@ -98,19 +95,59 @@ async def get_poly_price():
 
     except Exception as e:
         log(f"⚠️ Poly: {e}")
-    return None, None, None
+    return None
 
-# ── 3. Scalping loop ───────────────────────────────────────
+# ── 3. Mesure du lag Kraken → Polymarket ──────────────────
+def measure_lag():
+    if len(kraken_history) < 20 or len(poly_history) < 20:
+        return 15
+
+    k_times  = [x[0] for x in kraken_history]
+    k_prices = [x[1] for x in kraken_history]
+    p_times  = [x[0] for x in poly_history]
+    p_prices = [x[1] for x in poly_history]
+
+    k_base = k_prices[0]
+    p_base = p_prices[0]
+    k_norm = [(p - k_base) / k_base for p in k_prices]
+    p_norm = [(p - p_base) / p_base for p in p_prices]
+
+    best_corr = -1
+    best_lag  = 15
+
+    for lag_s in range(5, 60):
+        matches = 0
+        total   = 0
+        for i, (kt, kv) in enumerate(zip(k_times, k_norm)):
+            target_time = kt + lag_s
+            closest = min(range(len(p_times)), key=lambda j: abs(p_times[j] - target_time))
+            if abs(p_times[closest] - target_time) < 3:
+                if (kv > 0 and p_norm[closest] > 0) or (kv < 0 and p_norm[closest] < 0):
+                    matches += 1
+                total += 1
+
+        if total > 5:
+            corr = matches / total
+            if corr > best_corr:
+                best_corr = corr
+                best_lag  = lag_s
+
+    return best_lag
+
+# ── 4. Scalping loop ───────────────────────────────────────
 async def scalping_loop():
     global daily_pnl, trade_count, win_count, loss_count, balance, clob_token_id
 
-    log("🤖 Bot SCALPING démarré — mode PAPER TRADING")
+    log("🤖 Bot LAG TRACKER démarré — mode PAPER TRADING")
     log(f"💰 Balance : ${balance:.2f} | Mise : ${STAKE_USDC:.2f}")
-    log(f"📊 Entry: {LAG_ENTRY*100:.1f}% | Exit: {LAG_EXIT*100:.1f}% | Stop: {STOP_LOSS*100:.1f}% | Zone interdite: {MIN_SECONDS}s")
+    log(f"📊 Règle d'or : NE JAMAIS PERDRE")
+    log(f"📊 Hold to end si > {HOLD_TO_END_PRICE} | Zone interdite: {MIN_SECONDS}s")
     log("-" * 60)
 
     window_open_price = None
     last_window       = None
+    measured_lag      = 15
+    kraken_recent     = deque(maxlen=10)
 
     while True:
         await asyncio.sleep(1)
@@ -118,20 +155,33 @@ async def scalping_loop():
         if btc_price is None:
             continue
 
-        # Suivi fenêtre 5 min
         now            = int(time.time())
         current_window = now - (now % 300)
         seconds_left   = 300 - (now % 300)
 
+        # Nouvelle fenêtre
         if current_window != last_window:
-            clob_token_id     = None        # reset token à chaque fenêtre
+            clob_token_id     = None
             window_open_price = btc_price
             last_window       = current_window
             log(f"")
-            log(f"🕐 Fenêtre | BTC: ${btc_price:,.2f} | {seconds_left}s | Trades: {trade_count} | Balance: ${balance:.2f} | Daily: ${daily_pnl:+.2f}")
+            log(f"🕐 Fenêtre | BTC: ${btc_price:,.2f} | {seconds_left}s | "
+                f"Trades: {trade_count} | Balance: ${balance:.2f} | Daily: ${daily_pnl:+.2f}")
 
         if window_open_price is None:
             continue
+
+        # Enregistre historique
+        poly_price = await get_poly_price()
+        if poly_price:
+            kraken_history.append((now, btc_price))
+            poly_history.append((now, poly_price))
+            kraken_recent.append((now, btc_price))
+
+        # Mesure lag toutes les 30s
+        if now % 30 == 0:
+            measured_lag = measure_lag()
+            log(f"📏 Lag mesuré: {measured_lag}s")
 
         # Zone interdite
         if seconds_left < MIN_SECONDS:
@@ -143,35 +193,37 @@ async def scalping_loop():
             await asyncio.sleep(300)
             continue
 
-        # Prix Polymarket
-        up_price, down_price, token_id = await get_poly_price()
-        if up_price is None:
+        if poly_price is None or len(kraken_recent) < 5:
             continue
 
-        btc_delta = (btc_price - window_open_price) / window_open_price
-        expected  = max(0.01, min(0.99, 0.50 + (btc_delta * 2)))
-        lag       = expected - up_price
+        # Mouvement Kraken récent
+        oldest_recent = kraken_recent[0][1]
+        kraken_move   = (btc_price - oldest_recent) / oldest_recent
 
-        log(f"📡 BTC: ${btc_price:,.2f} ({btc_delta*100:+.3f}%) | UP: {up_price:.3f} | Attendu: {expected:.3f} | Lag: {lag*100:+.2f}% | {seconds_left}s")
+        log(f"📡 BTC: ${btc_price:,.2f} | Move: {kraken_move*100:+.3f}% | "
+            f"Poly UP: {poly_price:.3f} | Lag: {measured_lag}s | {seconds_left}s")
 
-        # Pas assez de lag
-        if abs(lag) < LAG_ENTRY:
+        # Pas assez de mouvement
+        if abs(kraken_move) < MIN_MOVE:
             continue
 
-        # Direction
-        if lag > 0:
+        # Direction basée sur Kraken
+        if kraken_move > 0:
             direction = "YES (UP)"
-            entry     = up_price
+            entry     = poly_price
         else:
             direction = "NO (DOWN)"
-            entry     = down_price
+            entry     = 1 - poly_price
 
-        shares       = STAKE_USDC / entry
-        trade_count += 1
-        lag_at_entry = lag
+        shares          = STAKE_USDC / entry
+        trade_count    += 1
+        kraken_at_entry = btc_price
+        best_pnl        = 0.0
+        reversal_time   = None
 
         log(f"")
-        log(f"⚡ ENTRÉE #{trade_count} | {direction} @ {entry:.3f} | {shares:.1f} shares | Mise: ${STAKE_USDC:.2f} | {seconds_left}s restantes")
+        log(f"⚡ ENTRÉE #{trade_count} | {direction} @ {entry:.3f} | "
+            f"{shares:.1f} shares | Lag: {measured_lag}s | {seconds_left}s restantes")
 
         # ── Boucle de sortie ───────────────────────────────
         entry_time = time.time()
@@ -181,28 +233,62 @@ async def scalping_loop():
 
             now2          = int(time.time())
             seconds_left2 = 300 - (now2 % 300)
+            elapsed       = time.time() - entry_time
 
-            up2, down2, _ = await get_poly_price()
+            up2 = await get_poly_price()
             if up2 is None:
                 continue
 
-            # Calcul P&L basé sur réduction du lag
-            btc_delta2  = (btc_price - window_open_price) / window_open_price
-            expected2   = max(0.01, min(0.99, 0.50 + (btc_delta2 * 2)))
-            lag_now     = expected2 - up2
-            lag_reduced = abs(lag_at_entry) - abs(lag_now)
-            pnl_now     = lag_reduced * shares
-            elapsed     = time.time() - entry_time
+            # P&L actuel
+            pos_price = up2 if direction == "YES (UP)" else (1 - up2)
+            pnl_now   = (pos_price - entry) * shares
 
-            log(f"   ⏳ {elapsed:.0f}s | UP: {up2:.3f} | Lag: {lag_now*100:+.2f}% | P&L: ${pnl_now:+.2f} | {seconds_left2}s")
+            # Suivi meilleur P&L
+            if pnl_now > best_pnl:
+                best_pnl = pnl_now
 
-            # Conditions de sortie
+            # Kraken dans notre sens ?
+            kraken_change = (btc_price - kraken_at_entry) / kraken_at_entry
+            going_our_way = (kraken_change >= 0 and direction == "YES (UP)") or \
+                            (kraken_change <= 0 and direction == "NO (DOWN)")
+
+            # Détection retournement Kraken
+            if not going_our_way and reversal_time is None:
+                reversal_time = time.time()
+                log(f"   🔄 Kraken retourné ! Sortie dans ~{measured_lag}s si positif")
+
+            time_since_reversal = (time.time() - reversal_time) if reversal_time else 0
+
+            log(f"   ⏳ {elapsed:.0f}s | UP: {up2:.3f} | P&L: ${pnl_now:+.2f} | "
+                f"Best: ${best_pnl:+.2f} | Kraken: {kraken_change*100:+.3f}% | {seconds_left2}s")
+
+            # ── Conditions de sortie ──────────────────────
             exit_reason = None
 
-            if abs(lag_now) <= LAG_EXIT:
-                exit_reason = "✅ LAG RATTRAPÉ"
-            elif pnl_now < -(STAKE_USDC * STOP_LOSS):
-                exit_reason = "🛑 STOP LOSS"
+            # 1. HOLD TO END — position forte proche fin fenêtre
+            if pos_price >= HOLD_TO_END_PRICE and seconds_left2 < MIN_SECONDS:
+                log(f"   🎯 Position forte {pos_price:.3f} — on tient jusqu'à résolution !")
+                await asyncio.sleep(seconds_left2 + 2)
+                up_final = await get_poly_price()
+                if up_final:
+                    pos_final = up_final if direction == "YES (UP)" else (1 - up_final)
+                    pnl_now   = (pos_final - entry) * shares
+                exit_reason = "🏆 RÉSOLUTION FENÊTRE"
+
+            # 2. Protection profit — on a eu du gain et on en perd 50%
+            elif best_pnl >= 1.0 and pnl_now < best_pnl * 0.5:
+                exit_reason = "🔒 PROTECTION PROFIT"
+
+            # 3. Kraken retourné depuis lag mesuré → sortir si positif ou neutre
+            elif reversal_time and time_since_reversal >= measured_lag:
+                if pnl_now >= 0:
+                    exit_reason = "✅ SORTIE RETOURNEMENT (gain)"
+                else:
+                    # On attend encore un peu que Poly rattrape
+                    if time_since_reversal >= measured_lag * 1.5:
+                        exit_reason = "⚠️ SORTIE RETOURNEMENT (limite)"
+
+            # 4. Fin de fenêtre urgente
             elif seconds_left2 < 10:
                 exit_reason = "⏰ FIN FENÊTRE"
 
@@ -217,12 +303,14 @@ async def scalping_loop():
 
                 winrate = (win_count / trade_count * 100) if trade_count > 0 else 0
                 log(f"")
-                log(f"{'✅' if won else '❌'} SORTIE {exit_reason} | P&L: ${pnl_now:+.2f} | Balance: ${balance:.2f}")
-                log(f"   Durée: {elapsed:.0f}s | Win: {winrate:.0f}% ({win_count}W/{loss_count}L) | Daily: ${daily_pnl:+.2f}")
+                log(f"{'✅' if won else '❌'} SORTIE {exit_reason} | P&L: ${pnl_now:+.2f} | "
+                    f"Balance: ${balance:.2f}")
+                log(f"   Durée: {elapsed:.0f}s | Lag: {measured_lag}s | "
+                    f"Win: {winrate:.0f}% ({win_count}W/{loss_count}L) | Daily: ${daily_pnl:+.2f}")
                 log(f"")
                 break
 
-# ── 4. Main ────────────────────────────────────────────────
+# ── 5. Main ────────────────────────────────────────────────
 async def main():
     await asyncio.gather(
         kraken_feed(),
