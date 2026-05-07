@@ -252,9 +252,10 @@ async def scalping_loop():
             chainlink_strike = btc_chainlink  # strike = prix Chainlink à l'ouverture
             kraken_history.clear()
             log(f"")
+            cl_str = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
+            st_str = f"${chainlink_strike:,.2f}" if chainlink_strike else "N/A"
             log(f"🕐 Fenêtre | BTC Kraken: ${btc_price:,.2f} | "
-                f"Chainlink: ${btc_chainlink:,.2f if btc_chainlink else 'N/A'} | "
-                f"Strike: ${chainlink_strike:,.2f if chainlink_strike else 'N/A'} | "
+                f"Chainlink: {cl_str} | Strike: {st_str} | "
                 f"{seconds_left}s | Balance: ${balance:.2f} | Daily: ${daily_pnl:+.2f}")
 
         # Enregistre historique Kraken
