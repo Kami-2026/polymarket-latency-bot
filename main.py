@@ -106,10 +106,17 @@ async def chainlink_feed():
                 }))
                 log("✅ Chainlink connecté")
                 async for msg in ws:
-                    if msg == "PING":
+                    # Ignore messages vides ou PING texte
+                    if not msg or msg == "PING":
                         await ws.send("PONG")
                         continue
-                    data = json.loads(msg)
+                    try:
+                        data = json.loads(msg)
+                    except json.JSONDecodeError:
+                        continue
+                    if data.get("type") == "connection_ack":
+                        log("🔗 Chainlink handshake OK")
+                        continue
                     if data.get("topic") == "crypto_prices_chainlink":
                         payload = data.get("payload", {})
                         if payload.get("symbol") == "btc/usd":
