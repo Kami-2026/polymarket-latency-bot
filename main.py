@@ -19,6 +19,7 @@ MAX_DAILY_LOSS    = 0.05
 PAPER_BALANCE     = 1000.0
 MIN_LAG_POINTS    = 0.03
 MIN_DURATION      = 5
+MIN_INTENSITY     = 0.0002  # 0.02% minimum
 
 # ── État global ────────────────────────────────────────────
 btc_kraken        = None
@@ -217,7 +218,8 @@ async def scalping_loop():
     log("🤖 Bot CHAINLINK TRACKER démarré — mode PAPER TRADING")
     log(f"💰 Balance : ${balance:.2f} | Mise : ${STAKE_USDC:.2f}")
     log(f"📊 3 feeds : Kraken + Coinbase + Chainlink")
-    log(f"📊 Entrée : lag Poly > {MIN_LAG_POINTS} pts | Durée Kraken ≥ {MIN_DURATION}s")
+    log(f"📊 Entrée : lag > {MIN_LAG_POINTS} | durée ≥ {MIN_DURATION}s | intensité ≥ {MIN_INTENSITY*100:.2f}%")
+    log(f"📊 Poly zone : [{POLY_MIN}-{POLY_MAX}] | Zone interdite: {MIN_SECONDS}s")
     log(f"📊 Règle d'or : NE JAMAIS PERDRE")
     log("-" * 60)
 
@@ -272,6 +274,7 @@ async def scalping_loop():
         direction, duration, intensity = analyze_kraken()
 
         if now % 10 == 0:
+            arrow = "↑" if direction == "UP" else "↓" if direction else "-"
             log(f"📡 Kraken: ${btc_price:,.2f} | "
                 f"Chainlink: ${btc_chainlink:,.2f} | "
                 f"Tare: ${tare:+.1f} | "
@@ -279,15 +282,17 @@ async def scalping_loop():
                 f"Poly: {poly_price:.3f} | "
                 f"Théo: {poly_theo:.3f} | "
                 f"Lag: {lag:+.3f} | "
-                f"Kraken {direction} {duration:.0f}s | "
+                f"{arrow} {duration:.0f}s {intensity*100:+.3f}% | "
                 f"{seconds_left}s")
 
-        # Filtres d'entrée
+        # ── Filtres d'entrée ───────────────────────────────
         if abs(lag) < MIN_LAG_POINTS:
             continue
         if poly_price < POLY_MIN or poly_price > POLY_MAX:
             continue
-        if duration < MIN_DURATION:
+        if direction is None or duration < MIN_DURATION:
+            continue
+        if abs(intensity) < MIN_INTENSITY:
             continue
         if lag > 0 and direction != "UP":
             continue
@@ -381,7 +386,7 @@ async def scalping_loop():
             elif abs(lag_now) < 0.01 and pnl_now > 0:
                 exit_reason = "✅ LAG RATTRAPÉ"
 
-            # 3. Lag inversé → Poly a dépassé → sortir
+            # 3. Lag inversé → Poly a dépassé
             elif lag_at_entry > 0 and lag_now < -0.04:
                 if pnl_now > 0:
                     exit_reason = "✅ LAG INVERSÉ (profit)"
@@ -394,7 +399,7 @@ async def scalping_loop():
                 elif elapsed > 20:
                     exit_reason = "⚠️ LAG INVERSÉ (sortie)"
 
-            # 4. Kraken retourné depuis 15s → sortir si positif
+            # 4. Kraken retourné depuis 15s
             elif reversal_time and time_since_reversal >= 15:
                 if pnl_now > 0:
                     exit_reason = "✅ SORTIE APRÈS RETOURNEMENT"
