@@ -194,12 +194,12 @@ async def scalping_loop():
         source     = None
 
         if btc_kraken and btc_coinbase:
-            # Les deux dispo → on prend Coinbase (généralement plus rapide)
-            btc_price = btc_coinbase
-            source    = "Coinbase"
+            # On prend Kraken comme référence principale
+            btc_price = btc_kraken
+            source    = "Kraken"
             # Mais on log si ils diffèrent significativement
             diff = abs(btc_kraken - btc_coinbase)
-            if diff > 5:
+            if diff > 100:
                 log(f"⚠️ Écart K/C: ${diff:.2f} | Kraken: ${btc_kraken:,.2f} | Coinbase: ${btc_coinbase:,.2f}")
         elif btc_coinbase:
             btc_price = btc_coinbase
