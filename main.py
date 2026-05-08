@@ -214,7 +214,13 @@ async def scalping_loop():
             tare = get_tare_seconds()
             arrow = "↑" if direction == "UP" else "↓" if direction else "-"
             log(f"📡 BTC: ${btc_kraken:,.2f} | "
-                f"CL: ${btc_chainlink:,.2f if btc_chainlink else 0:.2f} | "
+                cl_str2 = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
+                log(f"📡 BTC: ${btc_kraken:,.2f} | "
+                    f"CL: {cl_str2} | "
+                    f"Tare: {tare:.0f}s | "
+                    f"Poly: {poly_price:.3f} | "
+                    f"{arrow} {intensity*100:+.3f}% | "
+                    f"{seconds_left}s")
                 f"Tare: {tare:.0f}s | "
                 f"Poly: {poly_price:.3f} | "
                 f"{arrow} {intensity*100:+.3f}% | "
