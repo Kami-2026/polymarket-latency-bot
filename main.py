@@ -14,7 +14,7 @@ STAKE_USDC    = 50.0
 POLY_MIN      = 0.40
 POLY_MAX      = 0.60
 MIN_SECONDS   = 60
-MIN_INTENSITY = 0.0002   # 0.02% minimum
+MIN_INTENSITY = 0.0002
 PAPER_BALANCE = 1000.0
 
 # ── État global ────────────────────────────────────────────
@@ -27,24 +27,17 @@ loss_count    = 0
 balance       = PAPER_BALANCE
 clob_token_id = None
 
-kraken_window   = deque(maxlen=30)   # 30s d'historique Kraken
-tare_history    = deque(maxlen=20)   # historique tare pour moyenne
+kraken_window = deque(maxlen=30)
+tare_history  = deque(maxlen=20)
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 def get_tare_seconds():
-    """
-    La tare en secondes = temps que met Poly à suivre Kraken.
-    Calculée comme l'écart prix Kraken/Chainlink converti en délai.
-    On utilise une moyenne mobile sur les dernières mesures.
-    """
     if len(tare_history) < 3:
-        return 15  # défaut 15s
+        return 15
     avg = sum(tare_history) / len(tare_history)
-    # Chaque $10 d'écart ≈ 1 seconde de lag (empirique)
-    lag_seconds = max(5, min(45, abs(avg) / 10))
-    return lag_seconds
+    return max(5, min(45, abs(avg) / 10))
 
 # ── 1. Feed Kraken ─────────────────────────────────────────
 async def kraken_feed():
@@ -109,20 +102,28 @@ async def get_poly_price():
     try:
         if clob_token_id:
             async with httpx.AsyncClient(timeout=2) as client:
-                resp = await client.get(f"https://clob.polymarket.com/midpoint?token_id={clob_token_id}")
+                resp = await client.get(
+                    f"https://clob.polymarket.com/midpoint?token_id={clob_token_id}"
+                )
                 return float(resp.json()["mid"])
 
         now  = int(time.time())
         slug = f"btc-updown-5m-{now - (now % 300)}"
         async with httpx.AsyncClient(timeout=3) as client:
-            events = (await client.get(f"https://gamma-api.polymarket.com/events?slug={slug}")).json()
+            events = (await client.get(
+                f"https://gamma-api.polymarket.com/events?slug={slug}"
+            )).json()
 
         if not events:
             return None
 
         for m in events[0].get("markets", []):
-            outcomes = json.loads(m.get("outcomes", "[]")) if isinstance(m.get("outcomes"), str) else m.get("outcomes", [])
-            tokens   = json.loads(m.get("clobTokenIds", "[]")) if isinstance(m.get("clobTokenIds"), str) else m.get("clobTokenIds", [])
+            outcomes = m.get("outcomes", "[]")
+            tokens   = m.get("clobTokenIds", "[]")
+            if isinstance(outcomes, str):
+                outcomes = json.loads(outcomes)
+            if isinstance(tokens, str):
+                tokens = json.loads(tokens)
             for i, o in enumerate(outcomes):
                 if "up" in o.lower():
                     clob_token_id = tokens[i]
@@ -134,19 +135,14 @@ async def get_poly_price():
 
 # ── 4. Direction Kraken ────────────────────────────────────
 def kraken_direction():
-    """
-    Retourne la direction et l'intensité du mouvement Kraken
-    sur la fenêtre glissante de 30s.
-    """
     if len(kraken_window) < 3:
         return None, 0
-
     prices    = [p for _, p in kraken_window]
     intensity = (prices[-1] - prices[0]) / prices[0]
     direction = "UP" if intensity > 0 else "DOWN"
     return direction, intensity
 
-# ── 5. Kraken continue dans ce sens ? (2-3 dernières sec) ──
+# ── 5. Kraken continue dans ce sens ? ─────────────────────
 def kraken_still_going(direction):
     if len(kraken_window) < 3:
         return True
@@ -163,7 +159,7 @@ async def scalping_loop():
     log("🤖 Bot TARE TRACKER démarré — mode PAPER TRADING")
     log(f"💰 Balance: ${balance:.2f} | Mise: ${STAKE_USDC:.2f}")
     log(f"📊 Entrée : Kraken ±{MIN_INTENSITY*100:.2f}%")
-    log(f"📊 Sortie : Kraken retourne → attendre durée tare → sort")
+    log(f"📊 Sortie : Kraken retourne → countdown tare → sort")
     log(f"📊 Re-retournement pendant countdown → on reste")
     log("-" * 60)
 
@@ -184,12 +180,13 @@ async def scalping_loop():
             clob_token_id = None
             last_window   = current_win
             kraken_window.clear()
-            cl_str = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
-            tare   = get_tare_seconds()
+            tare          = get_tare_seconds()
+            cl_str        = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
             log(f"")
             log(f"🕐 Fenêtre | BTC: ${btc_kraken:,.2f} | "
-                f"Chainlink: {cl_str} | Tare: {tare:.0f}s | "
-                f"{seconds_left}s | Balance: ${balance:.2f} | Daily: ${daily_pnl:+.2f}")
+                f"CL: {cl_str} | Tare: {tare:.0f}s | "
+                f"{seconds_left}s | Balance: ${balance:.2f} | "
+                f"Daily: ${daily_pnl:+.2f}")
 
         # Enregistre prix Kraken
         kraken_window.append((now, btc_kraken))
@@ -207,26 +204,21 @@ async def scalping_loop():
         if poly_price is None:
             continue
 
-        # Direction et intensité Kraken
+        # Direction Kraken
         direction, intensity = kraken_direction()
 
         if now % 10 == 0:
-            tare = get_tare_seconds()
+            tare  = get_tare_seconds()
             arrow = "↑" if direction == "UP" else "↓" if direction else "-"
+            cl_str = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
             log(f"📡 BTC: ${btc_kraken:,.2f} | "
-                cl_str2 = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
-                log(f"📡 BTC: ${btc_kraken:,.2f} | "
-                    f"CL: {cl_str2} | "
-                    f"Tare: {tare:.0f}s | "
-                    f"Poly: {poly_price:.3f} | "
-                    f"{arrow} {intensity*100:+.3f}% | "
-                    f"{seconds_left}s")
+                f"CL: {cl_str} | "
                 f"Tare: {tare:.0f}s | "
                 f"Poly: {poly_price:.3f} | "
                 f"{arrow} {intensity*100:+.3f}% | "
                 f"{seconds_left}s")
 
-        # ── Filtres d'entrée ───────────────────────────────
+        # Filtres d'entrée
         if direction is None:
             continue
         if abs(intensity) < MIN_INTENSITY:
@@ -242,9 +234,9 @@ async def scalping_loop():
             trade_dir = "NO (DOWN)"
             entry     = 1 - poly_price
 
-        shares         = STAKE_USDC / entry
-        trade_count   += 1
-        tare_at_entry  = get_tare_seconds()
+        shares        = STAKE_USDC / entry
+        trade_count  += 1
+        tare_at_entry = get_tare_seconds()
 
         log(f"")
         log(f"⚡ ENTRÉE #{trade_count} | {trade_dir} @ {entry:.3f} | "
@@ -255,7 +247,7 @@ async def scalping_loop():
 
         # ── Boucle de sortie ───────────────────────────────
         entry_time    = time.time()
-        reversal_time = None  # moment où Kraken s'est retourné
+        reversal_time = None
 
         while True:
             await asyncio.sleep(1)
@@ -264,30 +256,25 @@ async def scalping_loop():
             seconds_left2 = 300 - (now2 % 300)
             elapsed       = time.time() - entry_time
 
-            # Enregistre Kraken pendant le trade
             if btc_kraken:
                 kraken_window.append((now2, btc_kraken))
-                if btc_chainlink:
-                    tare_history.append(abs(btc_kraken - btc_chainlink))
+            if btc_kraken and btc_chainlink:
+                tare_history.append(abs(btc_kraken - btc_chainlink))
 
             up2 = await get_poly_price()
             if up2 is None:
                 continue
 
-            pos_price = up2 if trade_dir == "YES (UP)" else (1 - up2)
-            pnl_now   = (pos_price - entry) * shares
-
-            # Kraken toujours dans notre sens ?
+            pos_price   = up2 if trade_dir == "YES (UP)" else (1 - up2)
+            pnl_now     = (pos_price - entry) * shares
             still_going = kraken_still_going(direction)
             tare_now    = get_tare_seconds()
 
             if still_going:
-                # Kraken re-retourné dans notre sens → reset countdown
                 if reversal_time is not None:
                     log(f"   🔁 Re-retournement ! Countdown annulé — on reste")
                     reversal_time = None
             else:
-                # Kraken vient de se retourner → démarre countdown
                 if reversal_time is None:
                     reversal_time = time.time()
                     log(f"   🔄 Kraken retourné ! Countdown {tare_now:.0f}s démarré...")
@@ -302,11 +289,8 @@ async def scalping_loop():
 
             exit_reason = None
 
-            # SORTIE : countdown tare expiré
             if reversal_time and time_since_reversal >= tare_now:
                 exit_reason = "🔄 TARE EXPIRÉE"
-
-            # Fin fenêtre urgente
             elif seconds_left2 < 10:
                 exit_reason = "⏰ FIN FENÊTRE"
 
@@ -323,7 +307,7 @@ async def scalping_loop():
                 log(f"")
                 log(f"{'✅' if won else '❌'} SORTIE {exit_reason} | "
                     f"P&L: ${pnl_now:+.2f} | Balance: ${balance:.2f}")
-                log(f"   Durée: {elapsed:.0f}s | Tare utilisée: {tare_now:.0f}s | "
+                log(f"   Durée: {elapsed:.0f}s | Tare: {tare_now:.0f}s | "
                     f"Win: {winrate:.0f}% ({win_count}W/{loss_count}L) | "
                     f"Daily: ${daily_pnl:+.2f}")
                 log(f"")
