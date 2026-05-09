@@ -99,6 +99,10 @@ async def rtds_feed():
                     topic   = data.get("topic", "")
                     payload = data.get("payload", {})
 
+                    # Debug — log tout ce qui arrive
+                    if topic:
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 RTDS: {topic} | {payload}", flush=True)
+
                     if topic == "crypto_prices_binance" and payload.get("symbol") == "btcusdt":
                         btc_binance = float(payload["value"])
                         btc_prices.append((time.time(), btc_binance))
