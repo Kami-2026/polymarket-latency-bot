@@ -82,12 +82,12 @@ async def rtds_feed():
                 await ws.send(json.dumps({
                     "action": "subscribe",
                     "subscriptions": [
-                        {"topic": "crypto_prices_binance",   "type": "update", "filters": ""},
-                        {"topic": "crypto_prices_chainlink", "type": "update", "filters": ""}
+                        {"topic": "crypto_prices_binance", "type": "update", "filters": ""}
                     ]
                 }))
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ RTDS connecté (Binance + Chainlink)", flush=True)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 📤 Souscription envoyée", flush=True)
                 async for msg in ws:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] 📨 MSG: {msg[:100]}", flush=True)
                     if not msg or msg == "PING":
                         await ws.send("PONG")
                         continue
@@ -98,10 +98,6 @@ async def rtds_feed():
 
                     topic   = data.get("topic", "")
                     payload = data.get("payload", {})
-
-                    # Debug — log tout ce qui arrive
-                    if topic:
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 RTDS: {topic} | {payload}", flush=True)
 
                     if topic == "crypto_prices_binance" and payload.get("symbol") == "btcusdt":
                         btc_binance = float(payload["value"])
