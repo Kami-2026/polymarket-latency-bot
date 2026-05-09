@@ -255,9 +255,10 @@ async def scalping_loop():
         now2         = int(time.time())
         seconds_left = 300 - (now2 % 300)
 
-        # Vérifie que Kraken a continué pendant la tare
-        if not kraken_continued_during(direction, tare):
-            log(f"   ❌ Kraken s'est retourné pendant l'attente — signal annulé")
+        # Vérifie que le mouvement NET est toujours dans le bon sens
+        direction2, intensity2 = kraken_direction()
+        if direction2 != direction or abs(intensity2) < MIN_INTENSITY:
+            log(f"   ❌ Signal affaibli pendant l'attente — annulé")
             continue
 
         # Revérifie les filtres après attente
