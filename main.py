@@ -26,18 +26,10 @@ win_count     = 0
 loss_count    = 0
 balance       = PAPER_BALANCE
 clob_token_id = None
-
 kraken_window = deque(maxlen=30)
-tare_history  = deque(maxlen=20)
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
-
-def get_tare_seconds():
-    if len(tare_history) < 3:
-        return 15
-    avg = sum(tare_history) / len(tare_history)
-    return max(5, min(45, abs(avg) / 10))
 
 # ── 1. Feed Kraken ─────────────────────────────────────────
 async def kraken_feed():
@@ -142,25 +134,16 @@ def kraken_direction():
     direction = "UP" if intensity > 0 else "DOWN"
     return direction, intensity
 
-# ── 5. Kraken continue dans ce sens ? ─────────────────────
-def kraken_still_going(direction):
-    if len(kraken_window) < 3:
-        return True
-    recent = [p for _, p in list(kraken_window)[-3:]]
-    move   = recent[-1] - recent[0]
-    return (move >= 0 and direction == "UP") or \
-           (move <= 0 and direction == "DOWN")
-
-# ── 6. Scalping loop ───────────────────────────────────────
+# ── 5. Scalping loop ───────────────────────────────────────
 async def scalping_loop():
     global daily_pnl, trade_count, win_count, loss_count
     global balance, clob_token_id
 
-    log("🤖 Bot TARE TRACKER démarré — mode PAPER TRADING")
+    log("🤖 Bot PRIME TRACKER démarré — mode PAPER TRADING")
     log(f"💰 Balance: ${balance:.2f} | Mise: ${STAKE_USDC:.2f}")
-    log(f"📊 Entrée : Kraken ±{MIN_INTENSITY*100:.2f}%")
-    log(f"📊 Sortie : Kraken retourne → countdown tare → sort")
-    log(f"📊 Re-retournement pendant countdown → on reste")
+    log(f"📊 Entrée  : Kraken ±{MIN_INTENSITY*100:.2f}% | Poly [{POLY_MIN}-{POLY_MAX}]")
+    log(f"📊 Sortie  : dès que la prime baisse d'un tick")
+    log(f"📊 Règle   : ZÉRO PERTE")
     log("-" * 60)
 
     last_window = None
@@ -180,43 +163,28 @@ async def scalping_loop():
             clob_token_id = None
             last_window   = current_win
             kraken_window.clear()
-            tare          = get_tare_seconds()
-            cl_str        = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
+            cl_str = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
             log(f"")
-            log(f"🕐 Fenêtre | BTC: ${btc_kraken:,.2f} | "
-                f"CL: {cl_str} | Tare: {tare:.0f}s | "
-                f"{seconds_left}s | Balance: ${balance:.2f} | "
-                f"Daily: ${daily_pnl:+.2f}")
+            log(f"🕐 Fenêtre | BTC: ${btc_kraken:,.2f} | CL: {cl_str} | "
+                f"{seconds_left}s | Balance: ${balance:.2f} | Daily: ${daily_pnl:+.2f}")
 
-        # Enregistre prix Kraken
         kraken_window.append((now, btc_kraken))
 
-        # Met à jour la tare
-        if btc_kraken and btc_chainlink:
-            tare_history.append(abs(btc_kraken - btc_chainlink))
-
-        # Zone interdite
         if seconds_left < MIN_SECONDS:
             continue
 
-        # Prix Poly
         poly_price = await get_poly_price()
         if poly_price is None:
             continue
 
-        # Direction Kraken
         direction, intensity = kraken_direction()
 
         if now % 10 == 0:
-            tare  = get_tare_seconds()
-            arrow = "↑" if direction == "UP" else "↓" if direction else "-"
             cl_str = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
-            log(f"📡 BTC: ${btc_kraken:,.2f} | "
-                f"CL: {cl_str} | "
-                f"Tare: {tare:.0f}s | "
+            arrow  = "↑" if direction == "UP" else "↓" if direction else "-"
+            log(f"📡 BTC: ${btc_kraken:,.2f} | CL: {cl_str} | "
                 f"Poly: {poly_price:.3f} | "
-                f"{arrow} {intensity*100:+.3f}% | "
-                f"{seconds_left}s")
+                f"{arrow} {intensity*100:+.3f}% | {seconds_left}s")
 
         # Filtres d'entrée
         if direction is None:
@@ -234,68 +202,54 @@ async def scalping_loop():
             trade_dir = "NO (DOWN)"
             entry     = 1 - poly_price
 
-        shares        = STAKE_USDC / entry
-        trade_count  += 1
-        tare_at_entry = get_tare_seconds()
+        shares       = STAKE_USDC / entry
+        trade_count += 1
 
         log(f"")
         log(f"⚡ ENTRÉE #{trade_count} | {trade_dir} @ {entry:.3f} | "
             f"{shares:.1f} shares | "
-            f"Intensité: {intensity*100:+.3f}% | "
-            f"Tare: {tare_at_entry:.0f}s | "
+            f"Kraken {direction} {intensity*100:+.3f}% | "
             f"{seconds_left}s restantes")
 
         # ── Boucle de sortie ───────────────────────────────
         entry_time    = time.time()
-        reversal_time = None
+        last_pos      = entry  # dernière valeur de position connue
 
         while True:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
 
             now2          = int(time.time())
             seconds_left2 = 300 - (now2 % 300)
             elapsed       = time.time() - entry_time
 
-            if btc_kraken:
-                kraken_window.append((now2, btc_kraken))
-            if btc_kraken and btc_chainlink:
-                tare_history.append(abs(btc_kraken - btc_chainlink))
+            kraken_window.append((now2, btc_kraken))
 
             up2 = await get_poly_price()
             if up2 is None:
                 continue
 
-            pos_price   = up2 if trade_dir == "YES (UP)" else (1 - up2)
-            pnl_now     = (pos_price - entry) * shares
-            still_going = kraken_still_going(direction)
-            tare_now    = get_tare_seconds()
-
-            if still_going:
-                if reversal_time is not None:
-                    log(f"   🔁 Re-retournement ! Countdown annulé — on reste")
-                    reversal_time = None
-            else:
-                if reversal_time is None:
-                    reversal_time = time.time()
-                    log(f"   🔄 Kraken retourné ! Countdown {tare_now:.0f}s démarré...")
-
-            time_since_reversal = (time.time() - reversal_time) if reversal_time else 0
-            countdown_str = f"⏱️ {round(time_since_reversal)}s/{tare_now:.0f}s" \
-                            if reversal_time else "✅ OK"
+            pos_price = up2 if trade_dir == "YES (UP)" else (1 - up2)
+            pnl_now   = (pos_price - entry) * shares
 
             log(f"   ⏳ {elapsed:.0f}s | UP: {up2:.3f} | Pos: {pos_price:.3f} | "
-                f"P&L: ${pnl_now:+.2f} | "
-                f"{countdown_str} | {seconds_left2}s")
+                f"P&L: ${pnl_now:+.2f} | {seconds_left2}s")
 
             exit_reason = None
 
-            if reversal_time and time_since_reversal >= tare_now:
-                exit_reason = "🔄 TARE EXPIRÉE"
+            # RÈGLE UNIQUE : la prime recule → sortie immédiate
+            if pos_price < last_pos:
+                exit_reason = "📉 PRIME EN BAISSE"
+
+            # Fin de fenêtre
             elif seconds_left2 < 10:
                 exit_reason = "⏰ FIN FENÊTRE"
 
+            # Met à jour le dernier niveau de position
+            if pos_price > last_pos:
+                last_pos = pos_price
+
             if exit_reason:
-                won        = pnl_now > 0
+                won        = pnl_now >= 0
                 daily_pnl += pnl_now
                 balance   += pnl_now
                 if won:
@@ -307,13 +261,13 @@ async def scalping_loop():
                 log(f"")
                 log(f"{'✅' if won else '❌'} SORTIE {exit_reason} | "
                     f"P&L: ${pnl_now:+.2f} | Balance: ${balance:.2f}")
-                log(f"   Durée: {elapsed:.0f}s | Tare: {tare_now:.0f}s | "
+                log(f"   Durée: {elapsed:.0f}s | "
                     f"Win: {winrate:.0f}% ({win_count}W/{loss_count}L) | "
                     f"Daily: ${daily_pnl:+.2f}")
                 log(f"")
                 break
 
-# ── 7. Rapport horaire ─────────────────────────────────────
+# ── 6. Rapport horaire ─────────────────────────────────────
 async def hourly_report():
     while True:
         await asyncio.sleep(3600)
@@ -328,11 +282,10 @@ async def hourly_report():
         log(f"   🎯 Trades     : {trade_count} ({win_count}W / {loss_count}L)")
         log(f"   ✅ Win rate   : {winrate:.1f}%")
         log(f"   💵 Gain moyen : ${avg_pnl:+.2f} / trade")
-        log(f"   ⏱️  Tare       : {get_tare_seconds():.0f}s")
         log(f"{'='*60}")
         log(f"")
 
-# ── 8. Main ────────────────────────────────────────────────
+# ── 7. Main ────────────────────────────────────────────────
 async def main():
     await asyncio.gather(
         kraken_feed(),
