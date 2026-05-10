@@ -198,7 +198,7 @@ def kraken_signal_now(min_move):
         return None, 0
 
     for t, p in reversed(list(kraken_history)):
-        if p != btc_kraken and now - t <= 5:
+        if p != btc_kraken and now - t <= 15:
             pct = (btc_kraken - p) / p
             if abs(pct) >= min_move:
                 direction = "UP" if pct > 0 else "DOWN"
