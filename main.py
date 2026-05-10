@@ -9,83 +9,105 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Configuration commune ──────────────────────────────────
-STAKE_USDC      = 50.0
-MIN_SECONDS     = 60
-PAPER_BALANCE   = 1000.0
-MIN_GAIN_UNITS  = 0.03
-EXIT_THRESHOLD  = 0.01
+# ── Configuration ──────────────────────────────────────────
+STAKE_USDC     = 50.0
+MIN_SECONDS    = 60
+PAPER_BALANCE  = 1000.0
+MIN_GAIN_UNITS = 0.03
+EXIT_THRESHOLD = 0.01
 
-# ── Config Bot A ───────────────────────────────────────────
-A_MIN_INTENSITY = 0.0002  # 0.02%
-A_POLY_MIN      = 0.40
-A_POLY_MAX      = 0.60
+A_MIN_MOVE = 0.0002  # 0.02% mouvement Kraken
+A_POLY_MIN = 0.40
+A_POLY_MAX = 0.60
 
-# ── Config Bot B ───────────────────────────────────────────
-B_MIN_INTENSITY = 0.0003  # 0.03%
-B_POLY_MIN      = 0.35
-B_POLY_MAX      = 0.65
+B_MIN_MOVE = 0.0003  # 0.03%
+B_POLY_MIN = 0.35
+B_POLY_MAX = 0.65
 
-# ── État global partagé ────────────────────────────────────
+# ── État global ────────────────────────────────────────────
 btc_kraken    = None
 btc_chainlink = None
-kraken_prices = deque(maxlen=300)  # 5 min d'historique
-tare_history  = deque(maxlen=20)
-clob_cache    = {}
 
-# ── Stats ──────────────────────────────────────────────────
+# Historique avec timestamps précis
+kraken_history = deque(maxlen=600)  # 10 min
+poly_history   = deque(maxlen=600)
+clob_cache     = {}
+
+# Tare mesurée empiriquement
+measured_tare  = 15  # défaut 15s jusqu'à mesure réelle
+
 a = {"balance": PAPER_BALANCE, "daily_pnl": 0.0, "trades": 0, "wins": 0, "losses": 0}
 b = {"balance": PAPER_BALANCE, "daily_pnl": 0.0, "trades": 0, "wins": 0, "losses": 0}
 
 def log(tag, msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [{tag}] {msg}", flush=True)
 
-def get_tare():
-    if len(tare_history) < 3:
-        return 10
-    avg = sum(tare_history) / len(tare_history)
-    return max(5, min(30, abs(avg) / 5))
+def plog(msg):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-def kraken_price_ago(seconds):
-    """Prix Kraken il y a exactement N secondes"""
-    now    = time.time()
-    target = now - seconds
-    candidates = [(abs(t - target), p) for t, p in kraken_prices]
-    if not candidates:
-        return None
-    return min(candidates, key=lambda x: x[0])[1]
-
-def kraken_signal(tare_s, min_intensity):
+# ── Mesure empirique de la tare ────────────────────────────
+def measure_tare():
     """
-    Signal temps réel : prix maintenant vs prix il y a tare_s secondes.
-    C'est exactement le lag que Poly va combler.
+    Cherche le décalage temporel réel entre Kraken et Poly.
+    Pour chaque mouvement Kraken, mesure combien de secondes
+    plus tard Poly a bougé dans le même sens.
     """
-    past = kraken_price_ago(tare_s)
-    if past is None or btc_kraken is None:
-        return None, 0
-    intensity = (btc_kraken - past) / past
-    if abs(intensity) < min_intensity:
-        return None, 0
-    direction = "UP" if intensity > 0 else "DOWN"
-    return direction, intensity
+    global measured_tare
 
-def kraken_direction_now(tare_s):
-    """Direction Kraken actuelle vs il y a tare_s secondes"""
-    past = kraken_price_ago(tare_s)
-    if past is None or btc_kraken is None:
-        return None
-    if btc_kraken > past:
-        return "UP"
-    elif btc_kraken < past:
-        return "DOWN"
-    return None
+    if len(kraken_history) < 30 or len(poly_history) < 30:
+        return
+
+    k_times  = [t for t, _ in kraken_history]
+    k_prices = [p for _, p in kraken_history]
+    p_times  = [t for t, _ in poly_history]
+    p_prices = [p for _, p in poly_history]
+
+    best_score = -1
+    best_lag   = measured_tare
+
+    for lag_s in range(3, 45):
+        matches = 0
+        total   = 0
+        for i in range(1, len(k_times)):
+            # Mouvement Kraken entre i-1 et i
+            k_move = k_prices[i] - k_prices[i-1]
+            if abs(k_move) < 1.0:  # filtre bruit < $1
+                continue
+
+            # Cherche le mouvement Poly à t + lag_s
+            target = k_times[i] + lag_s
+            poly_at_target = None
+            poly_before    = None
+
+            for j in range(len(p_times)):
+                if abs(p_times[j] - target) < 2:
+                    poly_at_target = p_prices[j]
+                if abs(p_times[j] - k_times[i]) < 2:
+                    poly_before = p_prices[j]
+
+            if poly_at_target and poly_before:
+                p_move = poly_at_target - poly_before
+                # Même direction ?
+                if (k_move > 0 and p_move > 0) or (k_move < 0 and p_move < 0):
+                    matches += 1
+                total += 1
+
+        if total >= 5:
+            score = matches / total
+            if score > best_score:
+                best_score = score
+                best_lag   = lag_s
+
+    if best_score > 0.5:  # seulement si corrélation suffisante
+        measured_tare = best_lag
+        plog(f"📏 Tare mesurée: {measured_tare}s (score: {best_score:.2f})")
 
 # ── 1. Feed Kraken ─────────────────────────────────────────
 async def kraken_feed():
     global btc_kraken
     while True:
         try:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔌 Connexion Kraken...", flush=True)
+            plog("🔌 Connexion Kraken...")
             async with websockets.connect(
                 "wss://ws.kraken.com",
                 ping_interval=20, ping_timeout=10
@@ -95,18 +117,16 @@ async def kraken_feed():
                     "pair": ["XBT/USD"],
                     "subscription": {"name": "trade"}
                 }))
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Kraken connecté", flush=True)
+                plog("✅ Kraken connecté")
                 async for msg in ws:
                     data = json.loads(msg)
                     if isinstance(data, list) and len(data) > 1:
                         trades = data[1]
                         if isinstance(trades, list) and trades:
                             btc_kraken = float(trades[0][0])
-                            kraken_prices.append((time.time(), btc_kraken))
-                            if btc_chainlink:
-                                tare_history.append(abs(btc_kraken - btc_chainlink))
+                            kraken_history.append((time.time(), btc_kraken))
         except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Kraken: {e} — reconnexion 3s...", flush=True)
+            plog(f"⚠️ Kraken: {e} — reconnexion 3s...")
             btc_kraken = None
             await asyncio.sleep(3)
 
@@ -115,7 +135,7 @@ async def chainlink_feed():
     global btc_chainlink
     while True:
         try:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔌 Connexion Chainlink...", flush=True)
+            plog("🔌 Connexion Chainlink...")
             async with websockets.connect(
                 "wss://ws-live-data.polymarket.com",
                 ping_interval=5, ping_timeout=10
@@ -128,7 +148,7 @@ async def chainlink_feed():
                         "filters": ""
                     }]
                 }))
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Chainlink connecté", flush=True)
+                plog("✅ Chainlink connecté")
                 async for msg in ws:
                     if not msg or msg == "PING":
                         await ws.send("PONG")
@@ -138,11 +158,11 @@ async def chainlink_feed():
                     except:
                         continue
                     if data.get("topic") == "crypto_prices_chainlink":
-                        payload = data.get("payload", {})
-                        if payload.get("symbol") == "btc/usd":
-                            btc_chainlink = float(payload["value"])
+                        p = data.get("payload", {})
+                        if p.get("symbol") == "btc/usd":
+                            btc_chainlink = float(p["value"])
         except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Chainlink: {e} — reconnexion 3s...", flush=True)
+            plog(f"⚠️ Chainlink: {e} — reconnexion 3s...")
             btc_chainlink = None
             await asyncio.sleep(3)
 
@@ -153,10 +173,12 @@ async def get_poly_price():
     try:
         if wkey in clob_cache:
             async with httpx.AsyncClient(timeout=2) as client:
-                resp = await client.get(
+                r = await client.get(
                     f"https://clob.polymarket.com/midpoint?token_id={clob_cache[wkey]}"
                 )
-                return float(resp.json()["mid"])
+                price = float(r.json()["mid"])
+                poly_history.append((time.time(), price))
+                return price
 
         slug = f"btc-updown-5m-{wkey}"
         async with httpx.AsyncClient(timeout=3) as client:
@@ -182,17 +204,34 @@ async def get_poly_price():
         pass
     return None
 
-# ── 4. Boucle générique d'un bot ───────────────────────────
-async def bot_loop(tag, stats, min_intensity, poly_min, poly_max):
+# ── 4. Mouvement Kraken sur N secondes ─────────────────────
+def kraken_move_over(seconds):
+    """
+    Retourne (direction, pct) du mouvement Kraken
+    entre maintenant et il y a `seconds` secondes.
+    """
+    now    = time.time()
+    target = now - seconds
+    past   = [(abs(t - target), p) for t, p in kraken_history]
+    if not past or btc_kraken is None:
+        return None, 0
+    past_price = min(past, key=lambda x: x[0])[1]
+    pct        = (btc_kraken - past_price) / past_price
+    if pct == 0:
+        return None, 0
+    return ("UP" if pct > 0 else "DOWN"), pct
 
-    log(tag, f"Démarré | Kraken ±{min_intensity*100:.2f}% vs tare | "
-        f"Poly [{poly_min}-{poly_max}] | "
-        f"Gain min: {MIN_GAIN_UNITS} pts | Sortie: entry+{EXIT_THRESHOLD} pts")
+# ── 5. Boucle générique d'un bot ───────────────────────────
+async def bot_loop(tag, stats, min_move, poly_min, poly_max):
 
-    last_window = None
+    log(tag, f"Démarré | Kraken ±{min_move*100:.2f}% | Poly [{poly_min}-{poly_max}]")
+    log(tag, f"Règle : entrer dès mouvement Kraken | sortir quand Poly rattrape")
+
+    last_window  = None
+    last_tare_ms = 0
 
     while True:
-        await asyncio.sleep(0.5)  # check toutes les 0.5s pour réactivité
+        await asyncio.sleep(0.5)
 
         if btc_kraken is None:
             continue
@@ -205,44 +244,42 @@ async def bot_loop(tag, stats, min_intensity, poly_min, poly_max):
         if current_win != last_window:
             last_window = current_win
             cl_str = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
-            tare   = get_tare()
             log(tag, f"🕐 Fenêtre | Kraken: ${btc_kraken:,.2f} | CL: {cl_str} | "
-                f"Tare: {tare:.0f}s | {seconds_left}s | "
+                f"Tare: {measured_tare}s | {seconds_left}s | "
                 f"Balance: ${stats['balance']:.2f} | Daily: ${stats['daily_pnl']:+.2f}")
 
-        if seconds_left < MIN_SECONDS:
+        # Mesure tare toutes les 60s
+        if now - last_tare_ms >= 60:
+            last_tare_ms = now
+            measure_tare()
+
+        # Zone interdite
+        if seconds_left < MIN_SECONDS + measured_tare:
             continue
 
-        # Signal temps réel : Kraken maintenant vs il y a tare secondes
-        tare = get_tare()
-        direction, intensity = kraken_signal(tare, min_intensity)
-
-        if now % 30 == 0:
-            arrow  = "↑" if direction == "UP" else "↓" if direction else "-"
-            cl_str = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
-            poly_p = await get_poly_price()
-            poly_str = f"{poly_p:.3f}" if poly_p else "N/A"
-            log(tag, f"📡 Kraken: ${btc_kraken:,.2f} | CL: {cl_str} | "
-                f"Poly: {poly_str} | "
-                f"{arrow} {intensity*100:+.3f}% vs {tare:.0f}s ago | "
-                f"Tare: {tare:.0f}s | {seconds_left}s")
-
-        if direction is None:
-            continue
-
-        # Prix Poly au moment du signal
+        # Prix Poly
         poly_price = await get_poly_price()
         if poly_price is None:
             continue
 
-        # Filtres d'entrée
+        # Signal : mouvement Kraken sur la durée de la tare
+        direction, intensity = kraken_move_over(measured_tare)
+
+        if now % 30 == 0:
+            arrow  = "↑" if direction == "UP" else "↓" if direction else "-"
+            cl_str = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
+            log(tag, f"📡 Kraken: ${btc_kraken:,.2f} | CL: {cl_str} | "
+                f"Poly: {poly_price:.3f} | "
+                f"{arrow} {intensity*100:+.3f}% sur {measured_tare}s | "
+                f"Tare: {measured_tare}s | {seconds_left}s")
+
+        # Filtres entrée
+        if direction is None or abs(intensity) < min_move:
+            continue
         if poly_price < poly_min or poly_price > poly_max:
             continue
 
-        if seconds_left < MIN_SECONDS + tare:
-            continue
-
-        # Entrée immédiate dans le sens du mouvement Kraken
+        # ENTRÉE immédiate
         if direction == "UP":
             trade_dir = "YES (UP)"
             entry_pos = poly_price
@@ -251,6 +288,7 @@ async def bot_loop(tag, stats, min_intensity, poly_min, poly_max):
             entry_pos = 1 - poly_price
 
         shares         = STAKE_USDC / entry_pos
+        tare_at_entry  = measured_tare
         stats["trades"] += 1
         gain_threshold = entry_pos + MIN_GAIN_UNITS
         exit_trigger   = entry_pos + EXIT_THRESHOLD
@@ -258,11 +296,10 @@ async def bot_loop(tag, stats, min_intensity, poly_min, poly_max):
         log(tag, f"")
         log(tag, f"⚡ ENTRÉE #{stats['trades']} | {trade_dir} @ {entry_pos:.3f} | "
             f"{shares:.1f} shares | "
-            f"Kraken {direction} {intensity*100:+.3f}% vs {tare:.0f}s ago | "
-            f"Gain cible: {gain_threshold:.3f} | "
-            f"Sortie si ≤{exit_trigger:.3f} | {seconds_left}s")
+            f"Kraken {direction} {intensity*100:+.3f}% sur {tare_at_entry}s | "
+            f"Tare: {tare_at_entry}s | {seconds_left}s")
 
-        # ── Boucle de sortie ───────────────────────────────
+        # Boucle de sortie
         entry_time    = time.time()
         gain_seen     = False
         reversal_time = None
@@ -280,7 +317,7 @@ async def bot_loop(tag, stats, min_intensity, poly_min, poly_max):
 
             pos_price = up2 if trade_dir == "YES (UP)" else (1 - up2)
             pnl_now   = (pos_price - entry_pos) * shares
-            tare_now  = get_tare()
+            tare_now  = measured_tare
 
             # Gain confirmé ?
             if pos_price >= gain_threshold and not gain_seen:
@@ -288,9 +325,9 @@ async def bot_loop(tag, stats, min_intensity, poly_min, poly_max):
                 log(tag, f"   💚 Gain confirmé ! {pos_price:.3f} ≥ {gain_threshold:.3f} | "
                     f"P&L: ${pnl_now:+.2f}")
 
-            # Direction Kraken maintenant vs il y a tare_now secondes
-            kraken_dir_now = kraken_direction_now(tare_now)
-            still_going    = (kraken_dir_now == direction)
+            # Kraken toujours dans notre sens sur tare_now secondes ?
+            dir_now, _ = kraken_move_over(tare_now)
+            still_going = (dir_now == direction)
 
             if still_going:
                 if reversal_time is not None:
@@ -299,32 +336,32 @@ async def bot_loop(tag, stats, min_intensity, poly_min, poly_max):
             else:
                 if reversal_time is None and gain_seen:
                     reversal_time = time.time()
-                    log(tag, f"   🔄 Kraken retourné ! Countdown {tare_now:.0f}s démarré...")
+                    log(tag, f"   🔄 Kraken retourné ! Countdown {tare_now}s démarré...")
 
             time_since_reversal = (time.time() - reversal_time) if reversal_time else 0
-            countdown_str = f"⏱️ {round(time_since_reversal)}s/{tare_now:.0f}s" \
+            countdown_str = f"⏱️ {round(time_since_reversal)}s/{tare_now}s" \
                             if reversal_time else ("💚 actif" if gain_seen else "⏳ attente gain")
 
             log(tag, f"   ⏳ {elapsed:.0f}s | UP: {up2:.3f} | Pos: {pos_price:.3f} | "
                 f"P&L: ${pnl_now:+.2f} | "
-                f"K: {'↑' if kraken_dir_now=='UP' else '↓' if kraken_dir_now=='DOWN' else '-'} | "
+                f"K: {'↑' if dir_now=='UP' else '↓' if dir_now=='DOWN' else '-'} | "
                 f"{countdown_str} | {seconds_left3}s")
 
             exit_reason = None
 
-            # RÈGLE 1 : pas encore de gain + Poly sous entrée → sortie immédiate
+            # Pas encore de gain + sous entrée → sortie immédiate
             if not gain_seen and pos_price < entry_pos:
                 exit_reason = "🔻 SOUS ENTRÉE"
 
-            # RÈGLE 2 : gain vu + Poly repasse à entry+1 → protection profit
+            # Gain vu + Poly repasse à entry+1 → protection
             elif gain_seen and pos_price <= exit_trigger:
                 exit_reason = "🔒 PROTECTION PROFIT"
 
-            # RÈGLE 3 : gain vu + Kraken retourné depuis tare_now secondes
+            # Gain vu + Kraken retourné depuis tare_now secondes
             elif gain_seen and reversal_time and time_since_reversal >= tare_now:
                 exit_reason = "✅ TARE EXPIRÉE"
 
-            # RÈGLE 4 : fin de fenêtre
+            # Fin de fenêtre
             elif seconds_left3 < 10:
                 exit_reason = "⏰ FIN FENÊTRE"
 
@@ -342,48 +379,45 @@ async def bot_loop(tag, stats, min_intensity, poly_min, poly_max):
                 log(tag, f"")
                 log(tag, f"{'✅' if won else '❌'} SORTIE {exit_reason} | "
                     f"P&L: ${pnl_now:+.2f} | Balance: ${stats['balance']:.2f}")
-                log(tag, f"   Durée: {elapsed:.0f}s | Tare: {tare_now:.0f}s | "
+                log(tag, f"   Durée: {elapsed:.0f}s | Tare: {tare_now}s | "
                     f"Win: {winrate:.0f}% ({stats['wins']}W/{stats['losses']}L) | "
                     f"Daily: ${stats['daily_pnl']:+.2f}")
                 log(tag, f"")
                 break
 
-# ── 5. Rapport horaire ─────────────────────────────────────
+# ── 6. Rapport horaire ─────────────────────────────────────
 async def hourly_report():
     while True:
         await asyncio.sleep(3600)
-        tare = get_tare()
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] {'='*60}", flush=True)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 📊 RAPPORT — {datetime.now().strftime('%H:%M')}", flush=True)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] {'='*60}", flush=True)
+        plog(f"{'='*60}")
+        plog(f"📊 RAPPORT — {datetime.now().strftime('%H:%M')}")
+        plog(f"{'='*60}")
         for tag, stats in [("A", a), ("B", b)]:
             winrate = (stats["wins"] / stats["trades"] * 100) \
                       if stats["trades"] > 0 else 0
             avg_pnl = stats["daily_pnl"] / stats["trades"] \
                       if stats["trades"] > 0 else 0
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] [{tag}] "
-                  f"💰 ${stats['balance']:.2f} | "
-                  f"P&L: ${stats['daily_pnl']:+.2f} | "
-                  f"Trades: {stats['trades']} ({stats['wins']}W/{stats['losses']}L) | "
-                  f"Win: {winrate:.1f}% | Moy: ${avg_pnl:+.2f}", flush=True)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}]    ⏱️  Tare: {tare:.0f}s", flush=True)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] {'='*60}", flush=True)
+            plog(f"[{tag}] 💰 ${stats['balance']:.2f} | "
+                 f"P&L: ${stats['daily_pnl']:+.2f} | "
+                 f"Trades: {stats['trades']} ({stats['wins']}W/{stats['losses']}L) | "
+                 f"Win: {winrate:.1f}% | Moy: ${avg_pnl:+.2f}")
+        plog(f"   ⏱️  Tare mesurée: {measured_tare}s")
+        plog(f"{'='*60}")
 
-# ── 6. Main ────────────────────────────────────────────────
+# ── 7. Main ────────────────────────────────────────────────
 async def main():
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🤖 DUAL BOT — PAPER TRADING", flush=True)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 💰 Balance : ${PAPER_BALANCE:.2f} chacun", flush=True)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] [A] Kraken ±0.02% vs tare | Poly 0.40-0.60", flush=True)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] [B] Kraken ±0.03% vs tare | Poly 0.35-0.65", flush=True)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 📊 Gain min: {MIN_GAIN_UNITS} pts | "
-          f"Sortie: entry+{EXIT_THRESHOLD} | ZÉRO PERTE", flush=True)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] " + "-"*60, flush=True)
+    plog(f"🤖 DUAL BOT — PAPER TRADING")
+    plog(f"💰 Balance : ${PAPER_BALANCE:.2f} chacun")
+    plog(f"[A] Kraken ±0.02% | Poly 0.40-0.60")
+    plog(f"[B] Kraken ±0.03% | Poly 0.35-0.65")
+    plog(f"📊 Tare mesurée empiriquement | Gain min: {MIN_GAIN_UNITS} pts")
+    plog("-" * 60)
 
     await asyncio.gather(
         kraken_feed(),
         chainlink_feed(),
-        bot_loop("A", a, A_MIN_INTENSITY, A_POLY_MIN, A_POLY_MAX),
-        bot_loop("B", b, B_MIN_INTENSITY, B_POLY_MIN, B_POLY_MAX),
+        bot_loop("A", a, A_MIN_MOVE, A_POLY_MIN, A_POLY_MAX),
+        bot_loop("B", b, B_MIN_MOVE, B_POLY_MIN, B_POLY_MAX),
         hourly_report()
     )
 
