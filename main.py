@@ -220,8 +220,8 @@ async def bot_loop(tag, stats, min_intensity, poly_min, poly_max):
         now2            = int(time.time())
         seconds_left    = 300 - (now2 % 300)
 
-        if direction2 != direction or abs(intensity2) < min_intensity:
-            log(tag, f"   ❌ Signal affaibli — annulé")
+        if direction2 != direction:
+            log(tag, f"   ❌ Direction inversée — annulé")
             continue
         if poly_price is None or poly_price < poly_min or poly_price > poly_max:
             log(tag, f"   ❌ Poly hors zone — annulé")
