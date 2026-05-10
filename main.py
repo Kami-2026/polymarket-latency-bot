@@ -190,19 +190,20 @@ async def get_poly_price():
 # ── 4. Signal Kraken : mouvement sur SIGNAL_WINDOW secondes
 def kraken_signal_now(min_move):
     """
-    Détecte un mouvement Kraken sur les SIGNAL_WINDOW dernières secondes.
-    Ce mouvement n'a pas encore été intégré par Poly.
+    Compare le prix actuel avec le dernier prix différent
+    dans les 5 dernières secondes.
     """
-    now    = time.time()
-    target = now - SIGNAL_WINDOW
-    past   = [(abs(t - target), p) for t, p in kraken_history]
-    if not past or btc_kraken is None:
+    now = time.time()
+    if btc_kraken is None or len(kraken_history) < 2:
         return None, 0
-    past_price = min(past, key=lambda x: x[0])[1]
-    pct        = (btc_kraken - past_price) / past_price
-    if abs(pct) < min_move:
-        return None, 0
-    return ("UP" if pct > 0 else "DOWN"), pct
+
+    for t, p in reversed(list(kraken_history)):
+        if p != btc_kraken and now - t <= 5:
+            pct = (btc_kraken - p) / p
+            if abs(pct) >= min_move:
+                direction = "UP" if pct > 0 else "DOWN"
+                return direction, pct
+    return None, 0
 
 # ── 5. Direction Kraken sur tare secondes (pour sortie) ────
 def kraken_direction_tare(tare_s):
