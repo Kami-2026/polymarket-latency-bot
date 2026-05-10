@@ -221,8 +221,9 @@ async def bot_loop(tag, stats, min_intensity, poly_min, poly_max):
             arrow  = "↑" if direction == "UP" else "↓" if direction else "-"
             cl_str = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
             poly_p = await get_poly_price()
+            poly_str = f"{poly_p:.3f}" if poly_p else "N/A"
             log(tag, f"📡 Kraken: ${btc_kraken:,.2f} | CL: {cl_str} | "
-                f"Poly: {poly_p:.3f if poly_p else 'N/A'} | "
+                f"Poly: {poly_str} | "
                 f"{arrow} {intensity*100:+.3f}% vs {tare:.0f}s ago | "
                 f"Tare: {tare:.0f}s | {seconds_left}s")
 
