@@ -66,7 +66,7 @@ def btc_direction_now(tare_s):
         return "DOWN"
     return None
 
-def btc_intensity(window_s=10):
+def btc_intensity(window_s=30):
     """Intensité du mouvement BTC sur window_s secondes"""
     now = time.time()
     recent = [(t, p) for t, p in btc_prices if now - t <= window_s]
