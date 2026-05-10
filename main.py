@@ -212,7 +212,9 @@ def kraken_move_over(seconds):
     """
     now    = time.time()
     target = now - seconds
-    past   = [(abs(t - target), p) for t, p in kraken_history]
+    past = [(abs(t - target), p) for t, p in kraken_history if abs(t - target) < 10]
+    if not past:
+        past = [(abs(t - target), p) for t, p in kraken_history]
     if not past or btc_kraken is None:
         return None, 0
     past_price = min(past, key=lambda x: x[0])[1]
