@@ -9,29 +9,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Configuration ──────────────────────────────────────────
-STAKE_USDC    = 50.0
-MIN_SECONDS   = 60
-PAPER_BALANCE = 1000.0
-POLY_MIN      = 0.35
-POLY_MAX      = 0.65
-DRAWDOWN      = 0.30
-
-A_MIN_MOVE    = 0.0002
-B_MIN_MOVE    = 0.0003
-
 # ── État global ────────────────────────────────────────────
 btc_kraken     = None
 btc_chainlink  = None
-kraken_history = deque(maxlen=600)
-poly_history   = deque(maxlen=120)
+kraken_history = deque(maxlen=1200)
+poly_history   = deque(maxlen=1200)
 clob_cache     = {}
 
-a = {"balance": PAPER_BALANCE, "daily_pnl": 0.0, "trades": 0, "wins": 0, "losses": 0}
-b = {"balance": PAPER_BALANCE, "daily_pnl": 0.0, "trades": 0, "wins": 0, "losses": 0}
-
-def log(tag, msg):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] [{tag}] {msg}", flush=True)
+# Stockage des mesures de lag
+lag_measures   = []
 
 def plog(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -138,59 +124,33 @@ async def get_poly_price():
         pass
     return None
 
-# ── 4. Mouvement Kraken ────────────────────────────────────
-def kraken_move(min_move):
-    """Dernier mouvement significatif de Kraken"""
+# ── 4. Détection mouvement Kraken ──────────────────────────
+def kraken_move_since(seconds, min_pct):
+    """Mouvement Kraken depuis N secondes"""
     if btc_kraken is None or len(kraken_history) < 2:
         return None, 0
-    now = time.time()
-    for t, p in reversed(list(kraken_history)):
-        if p != btc_kraken and now - t <= 15:
-            pct = (btc_kraken - p) / p
-            if abs(pct) >= min_move:
-                return ("UP" if pct > 0 else "DOWN"), pct
-    return None, 0
-
-def kraken_direction():
-    """Direction Kraken sur les 5 dernières secondes"""
-    if btc_kraken is None or len(kraken_history) < 2:
-        return None
     now    = time.time()
-    recent = [(t, p) for t, p in kraken_history if now - t <= 5]
-    if len(recent) < 2:
-        return None
-    prices = [p for _, p in recent]
-    move   = prices[-1] - prices[0]
-    if move > 0:   return "UP"
-    elif move < 0: return "DOWN"
-    return None
+    target = now - seconds
+    past   = [(abs(t - target), p) for t, p in kraken_history if abs(t - target) < 5]
+    if not past:
+        return None, 0
+    past_price = min(past, key=lambda x: x[0])[1]
+    pct        = (btc_kraken - past_price) / past_price
+    if abs(pct) < min_pct:
+        return None, 0
+    return ("UP" if pct > 0 else "DOWN"), pct
 
-# ── 5. Direction Poly sur les N dernières secondes ─────────
-def poly_direction(window_s=5):
-    """Direction Poly sur les window_s dernières secondes"""
-    if len(poly_history) < 2:
-        return None
-    now    = time.time()
-    recent = [(t, p) for t, p in poly_history if now - t <= window_s]
-    if len(recent) < 2:
-        return None
-    prices = [p for _, p in recent]
-    move   = prices[-1] - prices[0]
-    if move > 0:   return "UP"
-    elif move < 0: return "DOWN"
-    return None
+# ── 5. Boucle d'observation ────────────────────────────────
+async def observe_loop():
+    plog("👁️  MODE OBSERVATION — aucun trade")
+    plog("Mesure du lag réel entre Kraken et Poly")
+    plog("-" * 60)
 
-# ── 6. Boucle générique d'un bot ───────────────────────────
-async def bot_loop(tag, stats, min_move):
-
-    log(tag, f"Démarré | Kraken ±{min_move*100:.2f}% | Poly [{POLY_MIN}-{POLY_MAX}]")
-    log(tag, f"Entrée : Kraken ET Poly même direction")
-    log(tag, f"Sortie : retour entrée OU drawdown {DRAWDOWN*100:.0f}%")
-
-    last_window = None
+    last_window   = None
+    pending_moves = []  # mouvements Kraken en attente de confirmation Poly
 
     while True:
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1)
 
         if btc_kraken is None:
             continue
@@ -203,153 +163,109 @@ async def bot_loop(tag, stats, min_move):
         if current_win != last_window:
             last_window = current_win
             cl_str = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
-            log(tag, f"🕐 Fenêtre | Kraken: ${btc_kraken:,.2f} | CL: {cl_str} | "
-                f"{seconds_left}s | "
-                f"Balance: ${stats['balance']:.2f} | Daily: ${stats['daily_pnl']:+.2f}")
-
-        if seconds_left < MIN_SECONDS:
-            continue
+            plog(f"")
+            plog(f"🕐 Fenêtre | Kraken: ${btc_kraken:,.2f} | CL: {cl_str} | {seconds_left}s")
+            pending_moves.clear()
 
         # Prix Poly
         poly_price = await get_poly_price()
         if poly_price is None:
             continue
 
-        # Signaux
-        k_dir, k_intensity = kraken_move(min_move)
-        p_dir              = poly_direction(5)
-
+        # Log toutes les 30s
         if now % 30 == 0:
-            k_arrow = "↑" if k_dir == "UP" else "↓" if k_dir == "DOWN" else "-"
-            p_arrow = "↑" if p_dir == "UP" else "↓" if p_dir == "DOWN" else "-"
-            cl_str  = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
-            log(tag, f"📡 Kraken: ${btc_kraken:,.2f} | CL: {cl_str} | "
-                f"Poly: {poly_price:.3f} | "
-                f"K:{k_arrow}{k_intensity*100:+.3f}% P:{p_arrow} | {seconds_left}s")
+            k_dir, k_pct = kraken_move_since(10, 0.0001)
+            arrow = "↑" if k_dir == "UP" else "↓" if k_dir == "DOWN" else "-"
+            plog(f"📡 Kraken: ${btc_kraken:,.2f} | Poly: {poly_price:.3f} | "
+                 f"K10s: {arrow}{k_pct*100:+.3f}% | {seconds_left}s")
 
-        # Filtres entrée
-        if k_dir is None:
-            continue
-        if poly_price < POLY_MIN or poly_price > POLY_MAX:
-            continue
+        # Détecte mouvement Kraken significatif (>0.02%)
+        k_dir, k_pct = kraken_move_since(5, 0.0002)
+        if k_dir is not None:
+            # Enregistre si pas déjà en attente dans ce sens
+            already = any(m["dir"] == k_dir and now - m["t"] < 30
+                         for m in pending_moves)
+            if not already:
+                pending_moves.append({
+                    "t":          now,
+                    "dir":        k_dir,
+                    "pct":        k_pct,
+                    "kraken":     btc_kraken,
+                    "poly_start": poly_price,
+                    "confirmed":  False
+                })
+                plog(f"🔍 MOVE Kraken {k_dir} {k_pct*100:+.3f}% | "
+                     f"Poly: {poly_price:.3f} | Attente confirmation Poly...")
 
-        # ✅ FILTRE CLÉ : Kraken ET Poly même direction
-        if p_dir is None or p_dir != k_dir:
-            continue
-
-        # ENTRÉE immédiate
-        if k_dir == "UP":
-            trade_dir = "YES (UP)"
-            entry_pos = poly_price
-        else:
-            trade_dir = "NO (DOWN)"
-            entry_pos = 1 - poly_price
-
-        shares         = STAKE_USDC / entry_pos
-        stats["trades"] += 1
-        max_pnl        = 0.0
-
-        log(tag, f"")
-        log(tag, f"⚡ ENTRÉE #{stats['trades']} | {trade_dir} @ {entry_pos:.3f} | "
-            f"{shares:.1f} shares | "
-            f"K:{k_dir} {k_intensity*100:+.3f}% + P:{p_dir} confirmé | "
-            f"{seconds_left}s")
-
-        # Boucle de sortie
-        entry_time = time.time()
-
-        while True:
-            await asyncio.sleep(0.5)
-
-            now3          = int(time.time())
-            seconds_left3 = 300 - (now3 % 300)
-            elapsed       = time.time() - entry_time
-
-            up2 = await get_poly_price()
-            if up2 is None:
+        # Vérifie si Poly a confirmé un mouvement en attente
+        for move in pending_moves:
+            if move["confirmed"]:
                 continue
 
-            pos_price = up2 if trade_dir == "YES (UP)" else (1 - up2)
-            pnl_now   = (pos_price - entry_pos) * shares
+            elapsed = now - move["t"]
+            if elapsed > 60:  # timeout 60s
+                plog(f"⏱️  TIMEOUT {move['dir']} après 60s — Poly n'a pas confirmé")
+                move["confirmed"] = True
+                continue
 
-            if pnl_now > max_pnl:
-                max_pnl = pnl_now
+            poly_move = poly_price - move["poly_start"]
 
-            k_dir_now = kraken_direction()
+            # Poly a bougé dans le même sens ?
+            confirmed = (move["dir"] == "UP"   and poly_move >  0.01) or \
+                        (move["dir"] == "DOWN"  and poly_move < -0.01)
 
-            log(tag, f"   ⏳ {elapsed:.0f}s | UP: {up2:.3f} | Pos: {pos_price:.3f} | "
-                f"P&L: ${pnl_now:+.2f} | Max: ${max_pnl:+.2f} | "
-                f"K: {'↑' if k_dir_now=='UP' else '↓' if k_dir_now=='DOWN' else '-'} | "
-                f"{seconds_left3}s")
+            if confirmed:
+                lag = elapsed
+                lag_measures.append(lag)
+                move["confirmed"] = True
 
-            exit_reason = None
+                avg_lag = sum(lag_measures) / len(lag_measures)
+                plog(f"")
+                plog(f"✅ LAG MESURÉ #{len(lag_measures)} | "
+                     f"Direction: {move['dir']} | "
+                     f"Lag: {lag}s | "
+                     f"Kraken: {move['pct']*100:+.3f}% | "
+                     f"Poly: {move['poly_start']:.3f} → {poly_price:.3f} "
+                     f"({poly_move:+.3f}) | "
+                     f"Moyenne: {avg_lag:.1f}s")
+                plog(f"")
 
-            # 1. Retour au prix d'entrée → sortie immédiate
-            if pos_price <= entry_pos:
-                exit_reason = "🔻 RETOUR ENTRÉE"
+        # Nettoie les mouvements confirmés
+        pending_moves = [m for m in pending_moves if not m["confirmed"]]
 
-            # 2. Drawdown 30% du max → sortie
-            elif max_pnl > 0 and pnl_now < max_pnl * (1 - DRAWDOWN):
-                exit_reason = "📉 DRAWDOWN 30%"
-
-            # 3. Fin de fenêtre
-            elif seconds_left3 < 10:
-                exit_reason = "⏰ FIN FENÊTRE"
-
-            if exit_reason:
-                won = pnl_now > 0
-                stats["daily_pnl"] += pnl_now
-                stats["balance"]   += pnl_now
-                if won:
-                    stats["wins"] += 1
-                else:
-                    stats["losses"] += 1
-
-                winrate = (stats["wins"] / stats["trades"] * 100) \
-                          if stats["trades"] > 0 else 0
-                log(tag, f"")
-                log(tag, f"{'✅' if won else '❌'} SORTIE {exit_reason} | "
-                    f"P&L: ${pnl_now:+.2f} | Balance: ${stats['balance']:.2f}")
-                log(tag, f"   Durée: {elapsed:.0f}s | "
-                    f"Win: {winrate:.0f}% ({stats['wins']}W/{stats['losses']}L) | "
-                    f"Daily: ${stats['daily_pnl']:+.2f}")
-                log(tag, f"")
-                break
-
-# ── 7. Rapport horaire ─────────────────────────────────────
-async def hourly_report():
+# ── 6. Rapport toutes les 30 minutes ──────────────────────
+async def stats_report():
     while True:
-        await asyncio.sleep(3600)
+        await asyncio.sleep(1800)
+        if not lag_measures:
+            plog("📊 Pas encore de mesures...")
+            continue
+
+        avg  = sum(lag_measures) / len(lag_measures)
+        mn   = min(lag_measures)
+        mx   = max(lag_measures)
+        med  = sorted(lag_measures)[len(lag_measures)//2]
+
         plog(f"{'='*60}")
-        plog(f"📊 RAPPORT — {datetime.now().strftime('%H:%M')}")
+        plog(f"📊 STATS LAG après {len(lag_measures)} mesures")
         plog(f"{'='*60}")
-        for tag, stats in [("A", a), ("B", b)]:
-            winrate = (stats["wins"] / stats["trades"] * 100) \
-                      if stats["trades"] > 0 else 0
-            avg_pnl = stats["daily_pnl"] / stats["trades"] \
-                      if stats["trades"] > 0 else 0
-            plog(f"[{tag}] 💰 ${stats['balance']:.2f} | "
-                 f"P&L: ${stats['daily_pnl']:+.2f} | "
-                 f"Trades: {stats['trades']} ({stats['wins']}W/{stats['losses']}L) | "
-                 f"Win: {winrate:.1f}% | Moy: ${avg_pnl:+.2f}")
+        plog(f"   Moyenne  : {avg:.1f}s")
+        plog(f"   Médiane  : {med:.1f}s")
+        plog(f"   Min      : {mn:.1f}s")
+        plog(f"   Max      : {mx:.1f}s")
         plog(f"{'='*60}")
 
-# ── 8. Main ────────────────────────────────────────────────
+# ── 7. Main ────────────────────────────────────────────────
 async def main():
-    plog(f"🤖 DUAL BOT — PAPER TRADING")
-    plog(f"💰 Balance : ${PAPER_BALANCE:.2f} chacun")
-    plog(f"[A] Kraken ±0.02% | Poly {POLY_MIN}-{POLY_MAX}")
-    plog(f"[B] Kraken ±0.03% | Poly {POLY_MIN}-{POLY_MAX}")
-    plog(f"📊 Entrée : Kraken ET Poly même direction")
-    plog(f"📊 Sortie : retour entrée OU drawdown {DRAWDOWN*100:.0f}%")
+    plog(f"🤖 BOT OBSERVATION — mesure du lag Kraken → Poly")
+    plog(f"Durée recommandée : 2 heures minimum")
     plog("-" * 60)
 
     await asyncio.gather(
         kraken_feed(),
         chainlink_feed(),
-        bot_loop("A", a, A_MIN_MOVE),
-        bot_loop("B", b, B_MIN_MOVE),
-        hourly_report()
+        observe_loop(),
+        stats_report()
     )
 
 if __name__ == "__main__":
