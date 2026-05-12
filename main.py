@@ -95,7 +95,7 @@ async def execute_trade(token_id, direction, price, size_dollars):
             token_id=token_id,
             price=order_price,
             size=order_size,
-            side=Side.BUY,
+            side="BUY",
             order_type=OrderType.FOK
         ))
         resp = client.post_order(order, OrderType.FOK)
