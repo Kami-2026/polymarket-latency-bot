@@ -3,7 +3,6 @@ import json
 import time
 import math
 import os
-import pkgutil
 from collections import deque
 from datetime import datetime
 import websockets
@@ -14,15 +13,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Debug modules au démarrage ─────────────────────────────
-clob_mods = [m.name for m in pkgutil.iter_modules()
-             if 'clob' in m.name.lower() or 'poly' in m.name.lower()]
-print(f"📦 Modules clob/poly: {clob_mods}", flush=True)
-
 try:
-    import py_clob_client
-    print(f"✅ py_clob_client: {py_clob_client.__file__}", flush=True)
-except ImportError as e:
-    print(f"❌ py_clob_client: {e}", flush=True)
+    from py_clob_client_v2.client import ClobClient
+    print(f"✅ ClobClient OK", flush=True)
+    from py_clob_client_v2.clob_types import OrderArgs, OrderType, Side
+    print(f"✅ clob_types OK", flush=True)
+except Exception as e:
+    print(f"❌ {type(e).__name__}: {e}", flush=True)
 
 # ── Paramètres stratégie ───────────────────────────────────
 STAKE            = 2.0
