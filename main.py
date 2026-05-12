@@ -145,6 +145,9 @@ async def execute_trade(token_id, direction, price, size_dollars):
     except ImportError:
         plog(f"📝 py_clob_client non disponible — PAPER MODE")
         return {"paper": True}
+    except ImportError as e:
+        plog(f"⚠️ ImportError: {e}")
+        return None
     except Exception as e:
         plog(f"⚠️ execute_trade: {e}")
         return None
