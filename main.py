@@ -35,7 +35,7 @@ MAX_LOSS_SESSION = -10.0
 MAX_CONSEC_LOSS  = 3
 PAUSE_AFTER_LOSS = 600
 
-PAPER_MODE = False
+PAPER_MODE = True
 
 # ── État global ────────────────────────────────────────────
 btc_kraken        = None
