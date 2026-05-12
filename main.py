@@ -15,7 +15,7 @@ load_dotenv()
 STAKE            = 10.0
 POLY_MIN         = 0.35
 POLY_MAX         = 0.65
-ECART_MAX        = 0.08
+ECART_MAX        = 0.15   # élargi de 0.08 à 0.15
 KRAKEN_MOVE_MIN  = 0.00025
 MIN_SECONDS_LEFT = 30
 STOP_LOSS        = 0.025
@@ -171,7 +171,8 @@ async def trading_loop():
     plog(f"   Circuit break : ${MAX_LOSS_SESSION}")
     plog("-" * 60)
 
-    last_window = None
+    last_window  = None
+    last_log_30s = 0
 
     while True:
         try:
@@ -304,18 +305,38 @@ async def trading_loop():
             if poly_price is None:
                 continue
 
+            # Calcul filtres pour log status
+            strike = strike_by_window.get(current_win)
+            p_theo = poly_theorique(btc_kraken, strike, seconds_left) \
+                     if strike else None
+            diff   = (poly_price - p_theo) if p_theo else None
+
+            # ── Log status toutes les 30s ──────────────────
+            if now - last_log_30s >= 30:
+                last_log_30s = now
+                if p_theo is not None and diff is not None:
+                    k_prices = [p for t, p in kraken_history
+                                if now - t <= 5]
+                    k_pct    = ((k_prices[-1] - k_prices[0]) / k_prices[0]
+                                if len(k_prices) >= 2 else 0)
+
+                    zone_ok  = "✅" if POLY_MIN <= poly_price <= POLY_MAX \
+                               else "❌ hors zone"
+                    ecart_ok = "✅" if abs(diff) <= ECART_MAX \
+                               else f"❌ écart {diff:+.3f}"
+                    move_ok  = "✅" if abs(k_pct) >= KRAKEN_MOVE_MIN \
+                               else f"❌ move {k_pct*100:+.3f}%"
+
+                    plog(f"📡 Poly: {poly_price:.3f} {zone_ok} | "
+                         f"Écart: {ecart_ok} | "
+                         f"K move: {move_ok} | "
+                         f"{seconds_left}s")
+
+            # Filtres d'entrée
             if not (POLY_MIN <= poly_price <= POLY_MAX):
                 continue
-
-            strike = strike_by_window.get(current_win)
-            if not strike:
+            if not strike or p_theo is None or diff is None:
                 continue
-
-            p_theo = poly_theorique(btc_kraken, strike, seconds_left)
-            if p_theo is None:
-                continue
-
-            diff = poly_price - p_theo
             if abs(diff) > ECART_MAX:
                 continue
 
