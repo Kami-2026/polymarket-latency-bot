@@ -12,14 +12,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Debug modules au démarrage ─────────────────────────────
+# ── Test import py_clob_client_v2 ──────────────────────────
 try:
     from py_clob_client_v2.client import ClobClient
-    print(f"✅ ClobClient OK", flush=True)
     from py_clob_client_v2.clob_types import OrderArgs, OrderType, Side
-    print(f"✅ clob_types OK", flush=True)
+    CLOB_OK = True
+    print("✅ py_clob_client_v2 importé OK", flush=True)
 except Exception as e:
-    print(f"❌ {type(e).__name__}: {e}", flush=True)
+    CLOB_OK = False
+    print(f"❌ py_clob_client_v2: {e}", flush=True)
 
 # ── Paramètres stratégie ───────────────────────────────────
 STAKE            = 2.0
@@ -69,11 +70,10 @@ def poly_theorique(btc_actuel, strike, seconds_left, sigma_annuel=0.50):
 
 # ── Exécution ordre réel ───────────────────────────────────
 async def execute_trade(token_id, direction, price, size_dollars):
+    if not CLOB_OK:
+        plog("❌ py_clob_client_v2 non disponible")
+        return None
     try:
-        import py_clob_client_v2
-from py_clob_client_v2.client import ClobClient
-from py_clob_client_v2.clob_types import OrderArgs, OrderType, Side
-
         pk       = os.getenv("PK")
         host     = "https://clob.polymarket.com"
         chain_id = 137
@@ -101,9 +101,6 @@ from py_clob_client_v2.clob_types import OrderArgs, OrderType, Side
              f"resp: {resp}")
         return resp
 
-    except ImportError as e:
-        plog(f"❌ ImportError: {e}")
-        return None
     except Exception as e:
         plog(f"❌ execute_trade: {e}")
         return None
