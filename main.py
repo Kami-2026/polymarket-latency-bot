@@ -205,11 +205,12 @@ async def trading_loop():
                              f"Session: ${pnl_session:+.2f}")
                     position = None
 
-                plog(f"")
-                plog(f"🕐 Fenêtre | K: ${btc_kraken:,.2f} | "
-                     f"Strike: ${btc_chainlink:,.2f if btc_chainlink else 0:.2f} | "
-                     f"PnL session: ${pnl_session:+.2f}")
-                continue
+                cl_str = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
+plog(f"")
+plog(f"🕐 Fenêtre | K: ${btc_kraken:,.2f} | "
+     f"Strike: {cl_str} | "
+     f"PnL session: ${pnl_session:+.2f}")
+continue
 
             # Circuit breaker
             if pnl_session <= MAX_LOSS_SESSION:
