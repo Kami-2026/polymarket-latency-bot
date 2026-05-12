@@ -18,8 +18,8 @@ POLY_MAX         = 0.65
 ECART_MAX        = 0.08
 KRAKEN_MOVE_MIN  = 0.00025
 MIN_SECONDS_LEFT = 30
-STOP_LOSS        = 0.025   # perte max en cote Poly
-TAKE_PROFIT_TIME = 18      # sortie après 18s
+STOP_LOSS        = 0.025
+TAKE_PROFIT_TIME = 18
 MAX_LOSS_SESSION = -30.0
 MAX_CONSEC_LOSS  = 3
 PAUSE_AFTER_LOSS = 600
@@ -32,7 +32,6 @@ poly_history      = deque(maxlen=1200)
 clob_cache        = {}
 strike_by_window  = {}
 
-# État trading
 position          = None
 pnl_session       = 0.0
 trades_history    = []
@@ -163,7 +162,7 @@ async def get_poly_price():
 async def trading_loop():
     global position, pnl_session, consec_losses, pause_until
 
-    plog(f"🤖 BOT TRADING PAPER MODE 📝")
+    plog("🤖 BOT TRADING PAPER MODE 📝")
     plog(f"   Zone Poly     : {POLY_MIN}-{POLY_MAX}")
     plog(f"   Écart max     : ±{ECART_MAX}")
     plog(f"   Move Kraken   : {KRAKEN_MOVE_MIN*100:.3f}%+")
@@ -191,7 +190,7 @@ async def trading_loop():
                 if btc_chainlink:
                     strike_by_window[current_win] = btc_chainlink
 
-                # Ferme position en cours si fenêtre change
+                # Ferme position ouverte
                 if position is not None:
                     poly_price = await get_poly_price()
                     if poly_price:
@@ -206,24 +205,24 @@ async def trading_loop():
                     position = None
 
                 cl_str = f"${btc_chainlink:,.2f}" if btc_chainlink else "N/A"
-plog(f"")
-plog(f"🕐 Fenêtre | K: ${btc_kraken:,.2f} | "
-     f"Strike: {cl_str} | "
-     f"PnL session: ${pnl_session:+.2f}")
-continue
+                plog(f"")
+                plog(f"🕐 Fenêtre | K: ${btc_kraken:,.2f} | "
+                     f"Strike: {cl_str} | "
+                     f"PnL session: ${pnl_session:+.2f}")
+                continue
 
             # Circuit breaker
             if pnl_session <= MAX_LOSS_SESSION:
                 if now % 300 == 0:
                     plog(f"🔴 CIRCUIT BREAKER | "
-                         f"PnL session: ${pnl_session:.2f} | Arrêt")
+                         f"Session: ${pnl_session:.2f} | Arrêt")
                 continue
 
-            # Pause après pertes consécutives
+            # Pause après pertes
             if time.time() < pause_until:
                 continue
 
-            # ── Gestion position ouverte ───────────────────
+            # ── Position ouverte : gestion sortie ─────────
             if position is not None:
                 poly_price = await get_poly_price()
                 if poly_price is None:
@@ -239,7 +238,8 @@ continue
                           if now - t <= 5]
                 kraken_reversed = False
                 if len(recent) >= 2:
-                    pct = (recent[-1][1] - recent[0][1]) / recent[0][1]
+                    pct = ((recent[-1][1] - recent[0][1])
+                           / recent[0][1])
                     kraken_reversed = (
                         (position["dir"] == "UP"
                          and pct <= -KRAKEN_MOVE_MIN) or
@@ -247,20 +247,19 @@ continue
                          and pct >= KRAKEN_MOVE_MIN)
                     )
 
-                # Stop loss
                 poly_loss = pnl_now < -(STOP_LOSS * STAKE)
 
-                # Conditions sortie
                 if (elapsed >= TAKE_PROFIT_TIME or
                         poly_loss or
                         kraken_reversed or
                         seconds_left <= 5):
 
                     reason = (
-                        f"⏱️ {elapsed}s" if elapsed >= TAKE_PROFIT_TIME else
-                        f"🛑 stop loss" if poly_loss else
-                        f"🔄 Kraken retourné" if kraken_reversed else
-                        f"⚡ fin fenêtre"
+                        f"⏱️ {elapsed}s"
+                        if elapsed >= TAKE_PROFIT_TIME else
+                        "🛑 stop loss" if poly_loss else
+                        "🔄 Kraken retourné" if kraken_reversed else
+                        "⚡ fin fenêtre"
                     )
 
                     pnl_trade    = pnl_now - (STAKE * 0.01)
@@ -287,11 +286,11 @@ continue
                     plog(f"{emoji} SORTIE #{len(trades_history)} | "
                          f"{reason} | "
                          f"Dir: {position['dir']} | "
-                         f"Entrée: {position['entry_price']:.3f} → "
-                         f"Sortie: {poly_price:.3f} | "
+                         f"{position['entry_price']:.3f} → "
+                         f"{poly_price:.3f} | "
                          f"PnL: ${pnl_trade:+.2f} | "
                          f"Session: ${pnl_session:+.2f} | "
-                         f"Consec: {consec_losses}")
+                         f"Consec pertes: {consec_losses}")
                     plog(f"")
                     position = None
 
@@ -305,11 +304,9 @@ continue
             if poly_price is None:
                 continue
 
-            # Filtre zone
             if not (POLY_MIN <= poly_price <= POLY_MAX):
                 continue
 
-            # Calcul écart théorique
             strike = strike_by_window.get(current_win)
             if not strike:
                 continue
@@ -322,7 +319,7 @@ continue
             if abs(diff) > ECART_MAX:
                 continue
 
-            # Détecte mouvement Kraken sur 5s
+            # Mouvement Kraken sur 5s
             recent = [(t, p) for t, p in kraken_history
                       if now - t <= 5]
             if len(recent) < 2:
@@ -344,7 +341,7 @@ continue
                 continue
             pct_10s = ((recent_10s[-1][1] - recent_10s[0][1])
                        / recent_10s[0][1])
-            if direction == "UP"  and pct_10s <= 0:
+            if direction == "UP"   and pct_10s <= 0:
                 continue
             if direction == "DOWN" and pct_10s >= 0:
                 continue
@@ -353,12 +350,12 @@ continue
             plog(f"")
             plog(f"🎯 SIGNAL #{len(trades_history)+1} | "
                  f"Dir: {direction} | "
-                 f"K move: {pct*100:+.3f}% | "
+                 f"K: {pct*100:+.3f}% | "
                  f"Poly: {poly_price:.3f} | "
                  f"P_théo: {p_theo:.3f} | "
                  f"Écart: {diff:+.3f} | "
-                 f"{seconds_left}s restantes")
-            plog(f"   📝 PAPER BUY {'YES' if direction=='UP' else 'NO'} "
+                 f"{seconds_left}s")
+            plog(f"   📝 PAPER {'YES' if direction=='UP' else 'NO'} "
                  f"@ {poly_price:.3f} | ${STAKE}")
             plog(f"")
 
@@ -389,15 +386,14 @@ async def stats_report():
             plog(f"{'='*60}")
             plog(f"📊 RAPPORT — {datetime.now().strftime('%H:%M')}")
             plog(f"{'='*60}")
-            plog(f"   Trades        : {total} "
-                 f"({len(wins)}W / {len(losses)}L)")
-            plog(f"   Win rate      : {win_rate:.1f}%")
-            plog(f"   PnL session   : ${pnl_session:+.2f}")
+            plog(f"   Trades    : {total} ({len(wins)}W / {len(losses)}L)")
+            plog(f"   Win rate  : {win_rate:.1f}%")
+            plog(f"   PnL       : ${pnl_session:+.2f}")
             if wins:
-                plog(f"   Gain moyen    : "
+                plog(f"   Gain moy  : "
                      f"${sum(t['pnl'] for t in wins)/len(wins):+.2f}")
             if losses:
-                plog(f"   Perte moyenne : "
+                plog(f"   Perte moy : "
                      f"${sum(t['pnl'] for t in losses)/len(losses):+.2f}")
             plog(f"{'='*60}")
 
@@ -406,7 +402,7 @@ async def stats_report():
 
 # ── 6. Main ────────────────────────────────────────────────
 async def main():
-    plog(f"🤖 BOT TRADING POLYMARKET v1 — PAPER MODE")
+    plog("🤖 BOT TRADING POLYMARKET v1 — PAPER MODE")
     plog("-" * 60)
 
     await asyncio.gather(
