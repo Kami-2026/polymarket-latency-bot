@@ -73,9 +73,9 @@ def poly_theorique(btc_actuel, strike, seconds_left, sigma_annuel=0.50):
 # ── Exécution ordre réel ───────────────────────────────────
 async def execute_trade(token_id, direction, price, size_dollars):
     try:
-        import py_clob_client
-        from py_clob_client.client import ClobClient
-        from py_clob_client.clob_types import OrderArgs, OrderType, Side
+        import py_clob_client_v2
+from py_clob_client_v2.client import ClobClient
+from py_clob_client_v2.clob_types import OrderArgs, OrderType, Side
 
         pk       = os.getenv("PK")
         host     = "https://clob.polymarket.com"
