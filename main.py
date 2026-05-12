@@ -15,9 +15,12 @@ load_dotenv()
 # ── Test import py_clob_client_v2 ──────────────────────────
 try:
     from py_clob_client_v2.client import ClobClient
-    from py_clob_client_v2.clob_types import OrderArgs, OrderType, Side
+    from py_clob_client_v2.clob_types import OrderArgs, OrderType
     CLOB_OK = True
     print("✅ py_clob_client_v2 importé OK", flush=True)
+except Exception as e:
+    CLOB_OK = False
+    print(f"❌ py_clob_client_v2: {e}", flush=True)
 except Exception as e:
     CLOB_OK = False
     print(f"❌ py_clob_client_v2: {e}", flush=True)
