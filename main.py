@@ -11,7 +11,14 @@ from scipy.stats import norm
 from dotenv import load_dotenv
 
 load_dotenv()
-
+# Test import immédiat
+try:
+    import py_clob_client
+    print(f"✅ py_clob_client trouvé: {py_clob_client.__file__}", flush=True)
+    from py_clob_client.client import ClobClient
+    print(f"✅ ClobClient OK", flush=True)
+except Exception as e:
+    print(f"❌ IMPORT FAILED: {type(e).__name__}: {e}", flush=True)
 # ── Paramètres stratégie ───────────────────────────────────
 STAKE            = 2.0    # $2 par trade en réel
 POLY_MIN         = 0.35
