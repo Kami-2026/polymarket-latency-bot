@@ -3,6 +3,7 @@ import json
 import time
 import math
 import os
+import pkgutil
 from collections import deque
 from datetime import datetime
 import websockets
@@ -11,16 +12,20 @@ from scipy.stats import norm
 from dotenv import load_dotenv
 
 load_dotenv()
-# Test import immédiat
+
+# ── Debug modules au démarrage ─────────────────────────────
+clob_mods = [m.name for m in pkgutil.iter_modules()
+             if 'clob' in m.name.lower() or 'poly' in m.name.lower()]
+print(f"📦 Modules clob/poly: {clob_mods}", flush=True)
+
 try:
     import py_clob_client
-    print(f"✅ py_clob_client trouvé: {py_clob_client.__file__}", flush=True)
-    from py_clob_client.client import ClobClient
-    print(f"✅ ClobClient OK", flush=True)
-except Exception as e:
-    print(f"❌ IMPORT FAILED: {type(e).__name__}: {e}", flush=True)
+    print(f"✅ py_clob_client: {py_clob_client.__file__}", flush=True)
+except ImportError as e:
+    print(f"❌ py_clob_client: {e}", flush=True)
+
 # ── Paramètres stratégie ───────────────────────────────────
-STAKE            = 2.0    # $2 par trade en réel
+STAKE            = 2.0
 POLY_MIN         = 0.35
 POLY_MAX         = 0.65
 ECART_MAX        = 0.15
@@ -28,11 +33,11 @@ KRAKEN_MOVE_MIN  = 0.00025
 MIN_SECONDS_LEFT = 30
 STOP_LOSS        = 0.025
 TAKE_PROFIT_TIME = 18
-MAX_LOSS_SESSION = -10.0  # circuit breaker plus serré en réel
+MAX_LOSS_SESSION = -10.0
 MAX_CONSEC_LOSS  = 3
 PAUSE_AFTER_LOSS = 600
 
-PAPER_MODE = False  # 🔴 TRADING RÉEL
+PAPER_MODE = False
 
 # ── État global ────────────────────────────────────────────
 btc_kraken        = None
@@ -66,60 +71,9 @@ def poly_theorique(btc_actuel, strike, seconds_left, sigma_annuel=0.50):
         return None
 
 # ── Exécution ordre réel ───────────────────────────────────
-async def place_order(token_id, side, price, size_dollars):
-    """
-    Place un ordre réel sur Polymarket CLOB.
-    side  : "BUY" (YES) ou "BUY" (NO — token inversé)
-    price : 0.0 à 1.0
-    size  : en tokens (size_dollars / price)
-    """
-    try:
-        pk = os.getenv("PK")
-        if not pk:
-            plog("⚠️ PK manquante dans les variables d'environnement")
-            return None
-
-        size_tokens = round(size_dollars / price, 2)
-
-        async with httpx.AsyncClient(timeout=10) as client:
-            # 1. Récupère le nonce
-            headers = {"Content-Type": "application/json"}
-
-            # 2. Crée l'ordre via API CLOB
-            order_data = {
-                "order": {
-                    "salt":       int(time.time() * 1000),
-                    "maker":      "",  # sera rempli par signature
-                    "signer":     "",
-                    "taker":      "0x0000000000000000000000000000000000000000",
-                    "tokenId":    token_id,
-                    "makerAmount": str(int(size_dollars * 1e6)),
-                    "takerAmount": str(int(size_tokens * 1e6)),
-                    "expiration": "0",
-                    "nonce":      "0",
-                    "feeRateBps": "0",
-                    "side":       "BUY",
-                    "signatureType": 0,
-                    "signature":  ""
-                },
-                "owner":   "",
-                "orderType": "FOK"
-            }
-
-            plog(f"⚠️ Ordre réel nécessite py_clob_client — "
-                 f"utilise le module dédié")
-            return None
-
-    except Exception as e:
-        plog(f"⚠️ place_order: {e}")
-        return None
-
 async def execute_trade(token_id, direction, price, size_dollars):
-    """
-    Wrapper principal pour l'exécution.
-    Utilise py_clob_client si disponible, sinon fallback paper.
-    """
     try:
+        import py_clob_client
         from py_clob_client.client import ClobClient
         from py_clob_client.clob_types import OrderArgs, OrderType, Side
 
@@ -127,12 +81,13 @@ async def execute_trade(token_id, direction, price, size_dollars):
         host     = "https://clob.polymarket.com"
         chain_id = 137
 
+        if not pk:
+            plog("⚠️ PK manquante")
+            return None
+
         client = ClobClient(host, key=pk, chain_id=chain_id)
         client.set_api_creds(client.create_or_derive_api_creds())
 
-        # Pour YES : BUY le token UP
-        # Pour NO  : BUY le token DOWN (price = 1 - poly_price)
-        order_side = Side.BUY
         order_price = round(price, 2)
         order_size  = round(size_dollars / price, 2)
 
@@ -140,23 +95,20 @@ async def execute_trade(token_id, direction, price, size_dollars):
             token_id=token_id,
             price=order_price,
             size=order_size,
-            side=order_side,
+            side=Side.BUY,
             order_type=OrderType.FOK
         ))
         resp = client.post_order(order, OrderType.FOK)
-        plog(f"✅ ORDRE RÉEL EXÉCUTÉ | {direction} | "
+        plog(f"✅ ORDRE RÉEL | {direction} | "
              f"prix: {order_price} | size: {order_size} | "
              f"resp: {resp}")
         return resp
 
-    except ImportError:
-        plog(f"📝 py_clob_client non disponible — PAPER MODE")
-        return {"paper": True}
     except ImportError as e:
-        plog(f"⚠️ ImportError: {e}")
+        plog(f"❌ ImportError: {e}")
         return None
     except Exception as e:
-        plog(f"⚠️ execute_trade: {e}")
+        plog(f"❌ execute_trade: {e}")
         return None
 
 # ── 1. Feed Kraken ─────────────────────────────────────────
@@ -291,7 +243,6 @@ async def trading_loop():
             current_win  = now - (now % 300)
             seconds_left = 300 - (now % 300)
 
-            # Nouvelle fenêtre
             if current_win != last_window:
                 last_window = current_win
                 if btc_chainlink:
@@ -318,18 +269,15 @@ async def trading_loop():
                      f"PnL session: ${pnl_session:+.2f}")
                 continue
 
-            # Circuit breaker
             if pnl_session <= MAX_LOSS_SESSION:
                 if now % 300 == 0:
                     plog(f"🔴 CIRCUIT BREAKER | "
                          f"Session: ${pnl_session:.2f} | Arrêt")
                 continue
 
-            # Pause après pertes
             if time.time() < pause_until:
                 continue
 
-            # ── Position ouverte : gestion sortie ─────────
             if position is not None:
                 poly_price = await get_poly_price()
                 if poly_price is None:
@@ -368,7 +316,7 @@ async def trading_loop():
                         "⚡ fin fenêtre"
                     )
 
-                    pnl_trade    = pnl_now - (STAKE * 0.02)  # frais réels ~2%
+                    pnl_trade    = pnl_now - (STAKE * 0.02)
                     pnl_session += pnl_trade
 
                     if pnl_trade < 0:
@@ -402,7 +350,6 @@ async def trading_loop():
 
                 continue
 
-            # ── Cherche signal d'entrée ────────────────────
             if seconds_left <= MIN_SECONDS_LEFT:
                 continue
 
@@ -415,7 +362,6 @@ async def trading_loop():
                      if strike else None
             diff   = (poly_price - p_theo) if p_theo else None
 
-            # Log status toutes les 30s
             if now - last_log_30s >= 30:
                 last_log_30s = now
                 if p_theo is not None and diff is not None:
@@ -434,7 +380,6 @@ async def trading_loop():
                          f"K move: {move_ok} | "
                          f"{seconds_left}s")
 
-            # Filtres d'entrée
             if not (POLY_MIN <= poly_price <= POLY_MAX):
                 continue
             if not strike or p_theo is None or diff is None:
@@ -456,7 +401,6 @@ async def trading_loop():
             else:
                 continue
 
-            # Cohérence sur 10s
             recent_10s = [(t, p) for t, p in kraken_history
                           if now - t <= 10]
             if len(recent_10s) < 2:
@@ -468,12 +412,10 @@ async def trading_loop():
             if direction == "DOWN" and pct_10s >= 0:
                 continue
 
-            # ── ENTRÉE ────────────────────────────────────
             token_id = clob_cache.get(current_win)
             if not token_id:
                 continue
 
-            # Prix d'entrée selon direction
             entry_price = poly_price if direction == "UP" \
                           else (1 - poly_price)
 
@@ -491,7 +433,8 @@ async def trading_loop():
                      f"@ {entry_price:.3f} | ${STAKE}")
                 order = {"paper": True}
             else:
-                plog(f"   🔴 ORDRE RÉEL {'YES' if direction=='UP' else 'NO'} "
+                plog(f"   🔴 ORDRE RÉEL "
+                     f"{'YES' if direction=='UP' else 'NO'} "
                      f"@ {entry_price:.3f} | ${STAKE}")
                 order = await execute_trade(
                     token_id, direction, entry_price, STAKE
