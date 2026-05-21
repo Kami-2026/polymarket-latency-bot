@@ -438,14 +438,17 @@ async def trading_loop():
                 )
 
             if order is not None:
-                position = {
-                    "dir":         direction,
-                    "entry_price": poly_price,
-                    "t_entry":     now,
-                    "token_id":    token_id,
-                    "order":       order
-                }
-                plog(f"")
+    position = {
+        "dir":         direction,
+        "entry_price": poly_price,
+        "t_entry":     now,
+        "token_id":    token_id,
+        "order":       order
+    }
+    plog(f"")
+else:
+    plog("⚠️ Ordre échoué — pause 30s")
+    await asyncio.sleep(30)
 
         except Exception as e:
             plog(f"⚠️ trading_loop: {e}")
